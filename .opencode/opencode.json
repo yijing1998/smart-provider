@@ -1,0 +1,10 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "references": {
+    "litellm-code": {
+      "repository": "BerriAI/litellm",
+      "branch": "release/v1.89.2",
+      "description": "LiteLLM is an open source AI Gateway that gives you a single, unified interface to call 100+ LLM roviders — OpenAI, Anthropic, Gemini, Bedrock, Azure, and more — using the OpenAI format. Use it as a Python SDK for direct library integration, or deploy the AI Gateway (Proxy Server) as a centralized service for your team or organization."
+    }
+  }
+}
