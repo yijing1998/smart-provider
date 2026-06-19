@@ -1,10 +1,4 @@
-# Upstream-Forwarding Capability
-
-## Purpose
-
-定义 Smart-Provider 如何以可控速率将请求转发至真实上游模型 API，包括异步调用、超时处理、错误分类与结果回传机制。
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: 按放行顺序异步转发请求
 
@@ -23,6 +17,8 @@ Smart-Provider SHALL 以异步方式管理与上游 API 的连接，并支持合
 
 - **WHEN** 上游 API 在配置的超时时间内未返回响应
 - **THEN** 上游转发层 SHALL 将该请求标记为超时，并将超时结果返回给客户端
+
+## ADDED Requirements
 
 ### Requirement: 使用 litellm SDK 异步调用上游
 
