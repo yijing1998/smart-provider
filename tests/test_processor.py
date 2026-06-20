@@ -7,7 +7,7 @@ import pytest
 from litellm.exceptions import Timeout
 
 from src.config.schema import LimiterConfig
-from src.forwarder import ForwardResult, Forwarder
+from src.forwarder import ForwardResult, Forwarder, StubForwarder
 from src.ingress.context import RequestContext
 from src.limiter import SlidingWindowRateLimiter
 from src.processor import RequestProcessor
@@ -34,7 +34,7 @@ def _make_processor(
     return RequestProcessor(
         queue=queue,
         limiter=limiter,
-        forwarder=forwarder or Forwarder(),
+        forwarder=forwarder or StubForwarder(),
     )
 
 
@@ -151,7 +151,7 @@ class TestRequestProcessorWaitTimeout:
         processor = RequestProcessor(
             queue=queue,
             limiter=limiter,
-            forwarder=Forwarder(),
+            forwarder=StubForwarder(),
         )
 
         async def run() -> None:

@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from litellm.exceptions import BadRequestError, NotFoundError
 
 from src.config import Config
-from src.forwarder import ForwardResult, Forwarder
+from src.forwarder import ForwardResult, Forwarder, StubForwarder
 from src.ingress.app import _status_code_for_litellm_exception, create_app
 from src.ingress.context import RequestContext
 from src.queue import RequestQueue
@@ -41,7 +41,7 @@ class TestRequestParsingAndContext:
 
     def test_valid_request_returns_200(self):
         queue = RequestQueue(max_size=10)
-        app = create_app(queue=queue)
+        app = create_app(queue=queue, forwarder=StubForwarder())
 
         with TestClient(app) as client:
             response = client.post(
@@ -55,7 +55,7 @@ class TestRequestParsingAndContext:
         assert queue.size() == 0
 
     def test_invalid_json_body_returns_400(self):
-        app = create_app()
+        app = create_app(forwarder=StubForwarder())
 
         with TestClient(app) as client:
             response = client.post(
@@ -67,7 +67,7 @@ class TestRequestParsingAndContext:
         assert response.json()["error"]["type"] == "BadRequestError"
 
     def test_unknown_model_returns_404(self):
-        app = create_app()
+        app = create_app(forwarder=StubForwarder())
 
         with TestClient(app) as client:
             response = client.post(
@@ -81,7 +81,7 @@ class TestRequestParsingAndContext:
         assert response.status_code == 404
 
     def test_stream_request_returns_503(self):
-        app = create_app()
+        app = create_app(forwarder=StubForwarder())
 
         with TestClient(app) as client:
             response = client.post(
@@ -104,7 +104,7 @@ class TestRequestParsingAndContext:
                 return super().enqueue(context)
 
         queue = CapturingQueue(max_size=10)
-        app = create_app(queue=queue)
+        app = create_app(queue=queue, forwarder=StubForwarder())
 
         with TestClient(app) as client:
             client.post(
@@ -134,7 +134,7 @@ class TestQueueFullBehavior:
         queue.enqueue(
             RequestContext(model="gpt-4o", messages=[{"role": "user", "content": "x"}])
         )
-        app = create_app(queue=queue)
+        app = create_app(queue=queue, forwarder=StubForwarder())
 
         with TestClient(app) as client:
             response = client.post(
@@ -181,7 +181,11 @@ class TestConfigDefaults:
                 return super().enqueue(context)
 
         config = Config(upstream_url="https://custom.example.com/v1")
-        app = create_app(config=config, queue=CapturingQueue(max_size=10))
+        app = create_app(
+            config=config,
+            queue=CapturingQueue(max_size=10),
+            forwarder=StubForwarder(),
+        )
 
         with TestClient(app) as client:
             client.post("/v1/chat/completions", json=_valid_chat_request())

@@ -1,15 +1,27 @@
-"""Upstream forwarder interface and an asynchronous stub.
+"""Upstream forwarder interface, stub, and litellm-based implementation."""
 
-The forwarder is responsible for sending dequeued requests to the upstream
-API and returning the response. This module defines the async interface and
-a stub implementation so the request pipeline can be wired up before the real
-upstream integration (using litellm) is implemented.
-"""
+from __future__ import annotations
 
+import asyncio
+import logging
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any, Optional
 
+import litellm
+from litellm.exceptions import (
+    APIConnectionError,
+    APIError,
+    InternalServerError,
+    RateLimitError,
+    ServiceUnavailableError,
+    Timeout,
+)
+
+from src.config.schema import ForwarderConfig
 from src.ingress.context import RequestContext
+
+logger = logging.getLogger("litellm")
 
 
 @dataclass(frozen=True)
@@ -29,13 +41,17 @@ class ForwardResult:
     error: Optional[str] = None
 
 
-class Forwarder:
-    """Stub forwarder that returns a synthetic success response.
+class Forwarder(ABC):
+    """Abstract upstream forwarder."""
 
-    This allows the request pipeline to be tested end-to-end before the real
-    upstream forwarder (with timeout handling, error classification, and
-    litellm upstream calls) is implemented.
-    """
+    @abstractmethod
+    async def forward_async(self, context: RequestContext) -> ForwardResult:
+        """Send the request to the upstream API and return the response."""
+        ...
+
+
+class StubForwarder(Forwarder):
+    """Stub forwarder that returns a synthetic success response."""
 
     async def forward_async(self, context: RequestContext) -> ForwardResult:
         """Return a synthetic completion response for the given context."""
@@ -54,3 +70,100 @@ class Forwarder:
                 ],
             },
         )
+
+
+class LitellmForwarder(Forwarder):
+    """Forwarder that calls the upstream API via litellm.acompletion()."""
+
+    _RETRYABLE_EXCEPTIONS = (
+        APIConnectionError,
+        RateLimitError,
+        ServiceUnavailableError,
+        InternalServerError,
+    )
+
+    def __init__(self, config: ForwarderConfig) -> None:
+        self._config = config
+
+    async def forward_async(self, context: RequestContext) -> ForwardResult:
+        """Forward the request to the configured upstream API.
+
+        The method applies the configured timeout and retries with exponential
+        backoff. Retries are performed for transient errors such as connection
+        failures, 429 rate limits, and 5xx server errors. Other errors are
+        propagated immediately.
+
+        Args:
+            context: The internal request context to forward.
+
+        Returns:
+            A ``ForwardResult`` containing the upstream response.
+
+        Raises:
+            litellm exceptions matching the upstream error category, or
+            ``Timeout`` when the upstream call exceeds the configured timeout.
+        """
+        timeout_seconds = self._config.timeout_ms / 1000
+        kwargs: dict[str, Any] = {
+            "model": context.model,
+            "messages": context.messages,
+            "api_base": context.upstream_target,
+        }
+        if context.extra_body:
+            kwargs.update(context.extra_body)
+
+        last_exception: Optional[Exception] = None
+        max_attempts = self._config.max_retries + 1
+
+        for attempt in range(max_attempts):
+            try:
+                response = await asyncio.wait_for(
+                    litellm.acompletion(**kwargs),
+                    timeout=timeout_seconds,
+                )
+                body = self._response_to_dict(response)
+                return ForwardResult(status_code=200, body=body)
+            except asyncio.TimeoutError:
+                last_exception = Timeout(
+                    message="Upstream request timed out",
+                    llm_provider="smart-provider",
+                    model=context.model,
+                )
+            except self._RETRYABLE_EXCEPTIONS as exc:
+                last_exception = exc
+                logger.warning(
+                    "Request %s attempt %d/%d failed with %s: %s",
+                    context.request_id,
+                    attempt + 1,
+                    max_attempts,
+                    type(exc).__name__,
+                    exc,
+                )
+            except APIError as exc:
+                # Other API errors (e.g., 400, 401, 404) are not retried.
+                raise
+
+            if attempt < max_attempts - 1:
+                backoff_seconds = (self._config.retry_backoff_ms / 1000) * (
+                    2 ** attempt
+                )
+                logger.info(
+                    "Retrying request %s in %.2f seconds",
+                    context.request_id,
+                    backoff_seconds,
+                )
+                await asyncio.sleep(backoff_seconds)
+
+        if last_exception is not None:
+            raise last_exception
+
+        raise RuntimeError("Unexpected end of retry loop")
+
+    @staticmethod
+    def _response_to_dict(response: Any) -> dict[str, Any]:
+        """Convert a litellm response object to a JSON-serializable dict."""
+        if hasattr(response, "model_dump"):
+            return response.model_dump(mode="json")
+        if hasattr(response, "dict"):
+            return response.dict()
+        return dict(response)

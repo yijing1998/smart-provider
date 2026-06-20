@@ -30,7 +30,7 @@ from litellm.types.completion import CompletionRequest
 from pydantic import ValidationError
 
 from src.config import Config, load_config
-from src.forwarder import Forwarder
+from src.forwarder import Forwarder, LitellmForwarder
 from src.ingress.context import RequestContext
 from src.limiter import SlidingWindowRateLimiter
 from src.processor import RequestProcessor
@@ -58,7 +58,7 @@ def create_app(
     if request_processor is None:
         request_queue = queue or RequestQueue(max_size=cfg.queue.max_size)
         request_limiter = limiter or SlidingWindowRateLimiter(cfg.limiter)
-        request_forwarder = forwarder or Forwarder()
+        request_forwarder = forwarder or LitellmForwarder(cfg.forwarder)
         request_processor = RequestProcessor(
             request_queue, request_limiter, request_forwarder
         )

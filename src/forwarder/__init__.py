@@ -1,5 +1,5 @@
-"""Upstream forwarder stubs for Smart-Provider."""
+"""Upstream forwarder for Smart-Provider."""
 
-from .forwarder import ForwardResult, Forwarder
+from .forwarder import ForwardResult, Forwarder, LitellmForwarder, StubForwarder
 
-__all__ = ["ForwardResult", "Forwarder"]
+__all__ = ["ForwardResult", "Forwarder", "LitellmForwarder", "StubForwarder"]
