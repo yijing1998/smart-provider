@@ -3,9 +3,7 @@
 ## Purpose
 
 定义客户端请求如何进入 Smart-Provider，包括协议适配、请求校验、上下文封装，以及 Ingress 层所应遵循的技术栈约束。
-
 ## Requirements
-
 ### Requirement: 代理接收客户端请求
 Smart-Provider SHALL 接收来自客户端的模型 API 请求，并将请求封装为内部上下文对象。
 
@@ -62,3 +60,23 @@ Smart-Provider 的 Ingress SHALL 使用 litellm.exceptions 下的异常类型对
 
 - **WHEN** 客户端发送的请求体无法被 litellm 请求类型解析
 - **THEN** Ingress SHALL 抛出或映射为 litellm 的 BadRequestError 等价错误
+
+### Requirement: Ingress 支持流式聊天补全请求
+
+Smart-Provider 的 Ingress SHALL 接收 `stream=true` 的聊天补全请求，并以 `text/event-stream` 格式返回上游流式响应。
+
+#### Scenario: 流式请求返回 SSE
+
+- **WHEN** 客户端发送 `POST /v1/chat/completions` 且 `stream=true`
+- **THEN** Ingress SHALL 返回 `StreamingResponse`，媒体类型为 `text/event-stream`
+
+#### Scenario: 流式请求出错时返回 SSE error 事件
+
+- **WHEN** 流式请求在队列等待、限速或上游调用阶段失败
+- **THEN** Ingress SHALL 返回一个 SSE `event: error` 帧，并在最后发送 `data: [DONE]`
+
+#### Scenario: 客户端断开时取消流式处理
+
+- **WHEN** 客户端在接收 SSE 过程中断开连接
+- **THEN** Ingress SHALL 调用 `StreamHandle.cancel()` 通知 Worker 停止 upstream 流式调用
+

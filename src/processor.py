@@ -15,9 +15,11 @@ from datetime import datetime, timezone
 
 from litellm.exceptions import ServiceUnavailableError, Timeout
 
+from src.circuit_breaker import CircuitBreaker, CircuitBreakerState
 from src.forwarder import Forwarder
 from src.forwarder.forwarder import ForwardResult
 from src.ingress.context import RequestContext
+from src.ingress.stream_handle import StreamHandle
 from src.limiter.rate_limiter import SlidingWindowRateLimiter
 from src.observability import MetricsCollector
 from src.queue import RequestQueue
@@ -35,7 +37,8 @@ class RequestProcessor:
     2. Check whether the request has exceeded its maximum queue wait time.
     3. Acquire a permit from the rate limiter.
     4. Forward the request asynchronously.
-    5. Set the result (or exception) on the Future associated with the request.
+    5. Set the result (or exception) on the Future associated with the request,
+       or write chunks to the StreamHandle for streaming requests.
     """
 
     def __init__(
@@ -44,11 +47,13 @@ class RequestProcessor:
         limiter: SlidingWindowRateLimiter,
         forwarder: Forwarder,
         metrics: MetricsCollector | None = None,
+        circuit_breaker: CircuitBreaker | None = None,
     ) -> None:
         self._queue = queue
         self._limiter = limiter
         self._forwarder = forwarder
         self._metrics = metrics or MetricsCollector()
+        self._circuit_breaker = circuit_breaker
         self._futures: dict[str, asyncio.Future] = {}
         self._task: asyncio.Task | None = None
 
@@ -93,10 +98,66 @@ class RequestProcessor:
 
         return future
 
+    async def submit_stream(self, context: RequestContext) -> StreamHandle:
+        """Submit a streaming request context to the pipeline.
+
+        Returns a :class:`StreamHandle` that yields upstream chunks as they
+        arrive. If the queue is full, the handle is closed with an exception
+        immediately.
+
+        Args:
+            context: The internal request context to process.
+
+        Returns:
+            A StreamHandle representing the eventual upstream stream.
+        """
+        enqueue_result = self._queue.enqueue(context)
+        if not enqueue_result.success:
+            raise ServiceUnavailableError(
+                message="Request queue is full",
+                llm_provider="smart-provider",
+                model=context.model,
+            )
+
+        stream_handle = StreamHandle()
+        context.stream = True
+        context.stream_handle = stream_handle
+
+        await self._metrics.record_enqueue()
+        await self._metrics.record_stream_started()
+        observability_logger.info(
+            "Streaming request enqueued",
+            extra={
+                "request_id": context.request_id,
+                "client_id": context.client_id,
+                "model": context.model,
+                "queue_size": await self._current_queue_size(),
+            },
+        )
+
+        return stream_handle
+
     async def _current_queue_size(self) -> int:
         """Return the current queue size from the metrics collector."""
         snapshot = await self._metrics.snapshot()
         return int(snapshot.get("queue_size", 0))
+
+    async def _update_circuit_breaker_metrics(
+        self, previous_state: CircuitBreakerState | None
+    ) -> None:
+        """Update metrics when the circuit breaker state changes."""
+        if self._circuit_breaker is None:
+            return
+        current_state = self._circuit_breaker.state
+        if previous_state is not None and current_state == previous_state:
+            return
+        opened = (
+            current_state == CircuitBreakerState.OPEN
+            and previous_state != CircuitBreakerState.OPEN
+        )
+        await self._metrics.record_circuit_breaker_state(
+            current_state.name.lower(), opened=opened
+        )
 
     async def start(self) -> None:
         """Start the background worker."""
@@ -117,6 +178,9 @@ class RequestProcessor:
         """Main worker loop."""
         while True:
             context = await self._queue.dequeue()
+            previous_breaker_state = (
+                self._circuit_breaker.state if self._circuit_breaker else None
+            )
             try:
                 waited_ms = (
                     datetime.now(timezone.utc) - context.enqueued_at
@@ -138,28 +202,49 @@ class RequestProcessor:
                         context.request_id,
                         waited_ms,
                     )
-                    self._set_exception(
-                        context.request_id,
+                    await self._reject(
+                        context,
                         Timeout(
                             message="Request timed out while waiting in queue",
                             llm_provider="smart-provider",
                             model=context.model,
                         ),
+                        previous_breaker_state,
+                    )
+                    continue
+
+                if self._circuit_breaker is not None and not self._circuit_breaker.can_execute():
+                    await self._update_circuit_breaker_metrics(
+                        previous_breaker_state
+                    )
+                    logger.warning(
+                        "Request %s rejected because circuit breaker is open",
+                        context.request_id,
+                    )
+                    observability_logger.warning(
+                        "Request rejected by circuit breaker",
+                        extra={
+                            "request_id": context.request_id,
+                            "client_id": context.client_id,
+                            "model": context.model,
+                        },
+                    )
+                    await self._reject(
+                        context,
+                        ServiceUnavailableError(
+                            message="Circuit breaker is open",
+                            llm_provider="smart-provider",
+                            model=context.model,
+                        ),
+                        previous_breaker_state,
                     )
                     continue
 
                 await self._limiter.acquire()
-                result = await self._forwarder.forward_async(context)
-                self._set_result(context.request_id, result)
-                observability_logger.info(
-                    "Request forwarded successfully",
-                    extra={
-                        "request_id": context.request_id,
-                        "client_id": context.client_id,
-                        "model": context.model,
-                        "status_code": result.status_code,
-                    },
-                )
+                if context.stream:
+                    await self._process_stream(context, previous_breaker_state)
+                else:
+                    await self._process_request(context, previous_breaker_state)
             except Exception as exc:
                 logger.exception(
                     "Request %s processing failed", context.request_id
@@ -173,7 +258,81 @@ class RequestProcessor:
                         "error_type": type(exc).__name__,
                     },
                 )
-                self._set_exception(context.request_id, exc)
+                await self._reject(context, exc, previous_breaker_state)
+
+    async def _process_request(
+        self,
+        context: RequestContext,
+        previous_breaker_state: CircuitBreakerState | None,
+    ) -> None:
+        """Process a non-streaming request and resolve its Future."""
+        result = await self._forwarder.forward_async(context)
+        if self._circuit_breaker is not None:
+            self._circuit_breaker.record_success()
+        await self._update_circuit_breaker_metrics(previous_breaker_state)
+        self._set_result(context.request_id, result)
+        observability_logger.info(
+            "Request forwarded successfully",
+            extra={
+                "request_id": context.request_id,
+                "client_id": context.client_id,
+                "model": context.model,
+                "status_code": result.status_code,
+            },
+        )
+
+    async def _process_stream(
+        self,
+        context: RequestContext,
+        previous_breaker_state: CircuitBreakerState | None,
+    ) -> None:
+        """Process a streaming request and write chunks to its StreamHandle."""
+        stream_handle = context.stream_handle
+        if stream_handle is None:
+            raise RuntimeError("Streaming request missing StreamHandle")
+
+        try:
+            async for chunk in self._forwarder.stream_async(context):
+                if stream_handle.is_cancelled:
+                    break
+                stream_handle.put_chunk(chunk)
+            else:
+                if self._circuit_breaker is not None:
+                    self._circuit_breaker.record_success()
+        except Exception as exc:
+            if self._circuit_breaker is not None:
+                self._circuit_breaker.record_exception(exc)
+            stream_handle.put_error(exc)
+        finally:
+            await self._update_circuit_breaker_metrics(previous_breaker_state)
+            stream_handle.close()
+            await self._metrics.record_stream_completed()
+            observability_logger.info(
+                "Streaming request completed",
+                extra={
+                    "request_id": context.request_id,
+                    "client_id": context.client_id,
+                    "model": context.model,
+                },
+            )
+
+    async def _reject(
+        self,
+        context: RequestContext,
+        exc: BaseException,
+        previous_breaker_state: CircuitBreakerState | None,
+    ) -> None:
+        """Resolve a request with an exception or error a streaming handle."""
+        if self._circuit_breaker is not None:
+            self._circuit_breaker.record_exception(exc)
+            await self._update_circuit_breaker_metrics(previous_breaker_state)
+
+        if context.stream and context.stream_handle is not None:
+            context.stream_handle.put_error(exc)
+            context.stream_handle.close()
+            await self._metrics.record_stream_completed()
+        else:
+            self._set_exception(context.request_id, exc)
 
     def _set_result(self, request_id: str, result: ForwardResult) -> None:
         """Resolve the future for a request with a successful result."""

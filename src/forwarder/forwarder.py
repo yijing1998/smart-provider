@@ -6,7 +6,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 import litellm
 from litellm.exceptions import (
@@ -51,6 +51,13 @@ class Forwarder(ABC):
         """Send the request to the upstream API and return the response."""
         ...
 
+    @abstractmethod
+    async def stream_async(
+        self, context: RequestContext
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Send a streaming request to the upstream API and yield chunks."""
+        ...
+
 
 class StubForwarder(Forwarder):
     """Stub forwarder that returns a synthetic success response."""
@@ -72,6 +79,35 @@ class StubForwarder(Forwarder):
                 ],
             },
         )
+
+    async def stream_async(
+        self, context: RequestContext
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Yield a synthetic streaming chunk and a finish chunk."""
+        yield {
+            "id": context.request_id,
+            "object": "chat.completion.chunk",
+            "model": context.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": "pong"},
+                    "finish_reason": None,
+                }
+            ],
+        }
+        yield {
+            "id": context.request_id,
+            "object": "chat.completion.chunk",
+            "model": context.model,
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
 
 
 class LitellmForwarder(Forwarder):
@@ -169,6 +205,52 @@ class LitellmForwarder(Forwarder):
             raise last_exception
 
         raise RuntimeError("Unexpected end of retry loop")
+
+    async def stream_async(
+        self, context: RequestContext
+    ) -> AsyncIterator[dict[str, Any]]:
+        """Forward a streaming request to the configured upstream API.
+
+        The method calls ``litellm.acompletion(..., stream=True)`` and yields
+        each chunk as a JSON-serializable dict. Timeouts apply to the initial
+        upstream connection; once chunks start arriving, no per-chunk timeout
+        is enforced in this version.
+
+        Args:
+            context: The internal request context to forward.
+
+        Yields:
+            Dict representations of upstream streaming chunks.
+
+        Raises:
+            litellm exceptions matching the upstream error category, or
+            ``Timeout`` when the upstream call does not start within the
+            configured timeout.
+        """
+        timeout_seconds = self._config.timeout_ms / 1000
+        kwargs: dict[str, Any] = {
+            "model": context.model,
+            "messages": context.messages,
+            "api_base": context.upstream_target,
+            "stream": True,
+        }
+        if context.extra_body:
+            kwargs.update(context.extra_body)
+
+        try:
+            response = await asyncio.wait_for(
+                litellm.acompletion(**kwargs),
+                timeout=timeout_seconds,
+            )
+        except asyncio.TimeoutError:
+            raise Timeout(
+                message="Upstream stream request timed out",
+                llm_provider="smart-provider",
+                model=context.model,
+            )
+
+        async for chunk in response:
+            yield self._response_to_dict(chunk)
 
     async def _record_upstream_error(self, exc: APIError) -> None:
         """Update metrics for upstream errors.

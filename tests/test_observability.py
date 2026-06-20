@@ -7,8 +7,11 @@ import pytest
 from fastapi.testclient import TestClient
 from litellm.exceptions import RateLimitError, ServiceUnavailableError
 
+from src.circuit_breaker import CircuitBreaker
 from src.config import Config
-from src.forwarder import LitellmForwarder, StubForwarder
+from src.config.schema import CircuitBreakerConfig
+from src.forwarder import ForwardResult, Forwarder, LitellmForwarder, StubForwarder
+from src.ingress.context import RequestContext
 from src.observability import MetricsCollector
 from src.ingress.app import create_app
 
@@ -88,6 +91,34 @@ class TestMetricsCollector:
         assert snapshot["upstream_429_total"] == 0
         assert snapshot["wait_time_ms"]["count"] == 0
 
+    def test_circuit_breaker_metrics(self):
+        metrics = MetricsCollector()
+
+        async def run():
+            await metrics.record_circuit_breaker_state("open", opened=True)
+            await metrics.record_circuit_breaker_state("half_open")
+            await metrics.record_circuit_breaker_state("closed")
+            return await metrics.snapshot()
+
+        snapshot = _run(run())
+
+        assert snapshot["circuit_breaker_state"] == "closed"
+        assert snapshot["circuit_breaker_opens_total"] == 1
+
+    def test_streaming_metrics(self):
+        metrics = MetricsCollector()
+
+        async def run():
+            await metrics.record_stream_started()
+            await metrics.record_stream_started()
+            await metrics.record_stream_completed()
+            return await metrics.snapshot()
+
+        snapshot = _run(run())
+
+        assert snapshot["streams_started_total"] == 2
+        assert snapshot["streams_completed_total"] == 1
+
 
 class TestForwarderMetrics:
     """Verify that LitellmForwarder updates metrics on upstream errors."""
@@ -155,6 +186,10 @@ class TestMetricsEndpoint:
         assert "upstream_429_total" in body
         assert "upstream_5xx_total" in body
         assert "wait_time_ms" in body
+        assert "circuit_breaker_state" in body
+        assert "circuit_breaker_opens_total" in body
+        assert "streams_started_total" in body
+        assert "streams_completed_total" in body
 
     def test_metrics_endpoint_hidden_when_disabled(self):
         config = Config(observability_metrics_enabled=False)
@@ -182,6 +217,45 @@ class TestMetricsEndpoint:
         assert body["requests_processed_total"] == 1
         assert body["queue_size"] == 0
         assert body["wait_time_ms"]["count"] == 1
+
+    def test_metrics_endpoint_reflects_circuit_breaker_open(self):
+        class FailingForwarder(Forwarder):
+            async def forward_async(self, context: RequestContext) -> ForwardResult:
+                raise ServiceUnavailableError(
+                    message="upstream down",
+                    llm_provider="openai",
+                    model="gpt-4o",
+                )
+
+            async def stream_async(self, context: RequestContext):
+                if False:
+                    yield {}
+
+        breaker = CircuitBreaker(
+            CircuitBreakerConfig(
+                enabled=True, failure_threshold=1, recovery_timeout_ms=5000
+            )
+        )
+        config = Config(
+            observability_metrics_enabled=True, circuit_breaker_enabled=True
+        )
+        app = create_app(
+            config=config,
+            forwarder=FailingForwarder(),
+            circuit_breaker=breaker,
+        )
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            assert response.status_code == 503
+            metrics_response = client.get("/metrics")
+
+        body = metrics_response.json()
+        assert body["circuit_breaker_state"] == "open"
+        assert body["circuit_breaker_opens_total"] == 1
 
 
 def _forwarder_config(max_retries: int = 0, retry_backoff_ms: int = 10):

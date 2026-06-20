@@ -44,7 +44,7 @@ Smart-Provider 使用 [pydantic-settings](https://docs.pydantic.dev/projects/pyd
 | `SMART_PROVIDER_FORWARDER_TIMEOUT_MS` | `30000` | ≥1 | 上游 HTTP 调用超时（毫秒） |
 | `SMART_PROVIDER_FORWARDER_MAX_RETRIES` | `0` | ≥0 | 上游请求失败后的最大重试次数 |
 | `SMART_PROVIDER_FORWARDER_RETRY_BACKOFF_MS` | `1000` | ≥0 | 重试退避基数（毫秒） |
-| `SMART_PROVIDER_CIRCUIT_BREAKER_ENABLED` | `false` | — | 熔断器开关，当前预留 |
+| `SMART_PROVIDER_CIRCUIT_BREAKER_ENABLED` | `false` | — | 熔断器开关 |
 | `SMART_PROVIDER_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `5` | ≥1 | 触发熔断的连续失败次数阈值 |
 | `SMART_PROVIDER_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_MS` | `30000` | ≥1 | 熔断后恢复等待时间（毫秒） |
 | `SMART_PROVIDER_OBSERVABILITY_LOG_LEVEL` | `INFO` | `DEBUG/INFO/WARNING/ERROR/CRITICAL` | 日志级别，当前预留 |
@@ -52,7 +52,53 @@ Smart-Provider 使用 [pydantic-settings](https://docs.pydantic.dev/projects/pyd
 | `SMART_PROVIDER_DISTRIBUTED_RATE_LIMITER_ENABLED` | `false` | — | 分布式限速开关，当前预留 |
 | `SMART_PROVIDER_DISTRIBUTED_RATE_LIMITER_URL` | 未设置 | 可选字符串 | 分布式限速后端地址，例如 `redis://localhost:6379` |
 
-> 说明：表中“当前预留”的字段会被配置模型加载和校验，但当前代码尚未消费，默认处于关闭状态，不影响现有行为。
+> 说明：表中标注“当前预留”的字段会被配置模型加载和校验，但当前代码尚未消费，默认处于关闭状态，不影响现有行为。熔断器相关字段已实现。
+
+## 熔断器
+
+熔断器用于在上游 API 持续异常时保护 Smart-Provider。当上游连续失败次数达到 `SMART_PROVIDER_CIRCUIT_BREAKER_FAILURE_THRESHOLD` 时，熔断器打开，后续请求会直接返回 503 而不会调用上游；经过 `SMART_PROVIDER_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_MS` 后，熔断器进入半开状态，允许下一个请求作为探测，根据探测结果决定闭合或重新打开。
+
+仅以下上游/网络层错误会计入熔断失败计数：
+
+- 429 Too Many Requests
+- 5xx 服务端错误
+- 连接错误
+- 上游超时
+
+400/401/404 等客户端错误不会触发熔断计数。
+
+示例配置：
+
+```bash
+SMART_PROVIDER_CIRCUIT_BREAKER_ENABLED=true
+SMART_PROVIDER_CIRCUIT_BREAKER_FAILURE_THRESHOLD=3
+SMART_PROVIDER_CIRCUIT_BREAKER_RECOVERY_TIMEOUT_MS=30000
+```
+
+## 流式响应
+
+Smart-Provider 支持 OpenAI 兼容的流式聊天补全请求。当客户端发送 `stream=true` 时，系统会返回 `text/event-stream` 响应，逐 chunk 转发上游输出。
+
+流式请求与非流式请求共享同一个请求队列和单一 Worker，因此同样受 RPM 限速器和熔断器保护。每个流式请求消耗 1 个 RPM 配额。
+
+SSE 输出格式示例：
+
+```http
+data: {"id":"...","object":"chat.completion.chunk","choices":[{"delta":{"content":"Hello"}}]}
+
+data: {"id":"...","object":"chat.completion.chunk","choices":[{"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+```
+
+流式过程中若发生错误，会发送 `event: error` 帧：
+
+```http
+event: error
+data: {"error":{"message":"...","type":"ServiceUnavailableError"}}
+
+data: [DONE]
+```
 
 ## `.env` 文件示例
 

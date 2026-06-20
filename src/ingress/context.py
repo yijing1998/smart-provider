@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 from uuid import uuid4
 
+from src.ingress.stream_handle import StreamHandle
+
 
 @dataclass
 class RequestContext:
@@ -22,6 +24,7 @@ class RequestContext:
     client_id: str = "default"
     upstream_target: str = "https://api.openai.com/v1"
     stream: bool = False
+    stream_handle: Optional[StreamHandle] = None
     extra_body: Optional[dict[str, Any]] = None
     extra_headers: Optional[dict[str, str]] = None
     max_wait_time_ms: int = 30000

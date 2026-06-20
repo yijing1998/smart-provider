@@ -211,6 +211,81 @@ class TestLitellmForwarderErrors:
         assert mock_acompletion.call_count == 2
 
 
+class TestLitellmForwarderStreaming:
+    """Verify streaming upstream calls."""
+
+    @patch("src.forwarder.forwarder.litellm.acompletion", new_callable=AsyncMock)
+    def test_stream_async_yields_chunks(self, mock_acompletion):
+        class _FakeChunk:
+            def model_dump(self, mode: str = "json") -> dict:
+                return {"id": "chunk-1", "object": "chat.completion.chunk"}
+
+        async def _fake_stream(**kwargs):
+            yield _FakeChunk()
+            yield _FakeChunk()
+
+        mock_acompletion.return_value = _fake_stream()
+        forwarder = LitellmForwarder(_make_config())
+
+        async def run():
+            chunks = []
+            async for chunk in forwarder.stream_async(_context()):
+                chunks.append(chunk)
+            return chunks
+
+        chunks = asyncio.run(run())
+
+        assert len(chunks) == 2
+        assert chunks[0]["id"] == "chunk-1"
+        mock_acompletion.assert_awaited_once()
+        call_kwargs = mock_acompletion.await_args.kwargs
+        assert call_kwargs["stream"] is True
+        assert call_kwargs["model"] == "gpt-4o"
+
+    @patch("src.forwarder.forwarder.litellm.acompletion", new_callable=AsyncMock)
+    def test_stream_async_passes_extra_body(self, mock_acompletion):
+        class _FakeChunk:
+            def model_dump(self, mode: str = "json") -> dict:
+                return {"ok": True}
+
+        async def _fake_stream(**kwargs):
+            yield _FakeChunk()
+
+        mock_acompletion.return_value = _fake_stream()
+        forwarder = LitellmForwarder(_make_config())
+        context = RequestContext(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hello"}],
+            extra_body={"temperature": 0.5},
+        )
+
+        async def run():
+            chunks = []
+            async for chunk in forwarder.stream_async(context):
+                chunks.append(chunk)
+            return chunks
+
+        asyncio.run(run())
+
+        call_kwargs = mock_acompletion.await_args.kwargs
+        assert call_kwargs["temperature"] == 0.5
+
+    @patch("src.forwarder.forwarder.litellm.acompletion", new_callable=AsyncMock)
+    def test_stream_async_timeout_raises_timeout_exception(self, mock_acompletion):
+        async def _hang(**kwargs):
+            await asyncio.sleep(10)
+
+        mock_acompletion.side_effect = _hang
+        forwarder = LitellmForwarder(_make_config(timeout_ms=50))
+
+        async def run():
+            async for _ in forwarder.stream_async(_context()):
+                pass
+
+        with pytest.raises(Timeout):
+            asyncio.run(run())
+
+
 class TestLitellmForwarderBackoff:
     """Verify retry backoff timing."""
 

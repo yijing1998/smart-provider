@@ -9,12 +9,13 @@ remains with the forwarder module.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from fastapi import FastAPI, Header, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from litellm import get_model_info
 from litellm.exceptions import (
     APIConnectionError,
@@ -29,6 +30,7 @@ from litellm.exceptions import (
 from litellm.types.completion import CompletionRequest
 from pydantic import ValidationError
 
+from src.circuit_breaker import CircuitBreaker
 from src.config import Config, load_config
 from src.forwarder import Forwarder, LitellmForwarder
 from src.ingress.context import RequestContext
@@ -48,6 +50,7 @@ def create_app(
     limiter: Optional[SlidingWindowRateLimiter] = None,
     forwarder: Optional[Forwarder] = None,
     processor: Optional[RequestProcessor] = None,
+    circuit_breaker: Optional[CircuitBreaker] = None,
 ) -> FastAPI:
     """Create and configure the Ingress FastAPI application.
 
@@ -63,8 +66,14 @@ def create_app(
         request_queue = queue or RequestQueue(max_size=cfg.queue.max_size)
         request_limiter = limiter or SlidingWindowRateLimiter(cfg.limiter)
         request_forwarder = forwarder or LitellmForwarder(cfg.forwarder)
+        request_circuit_breaker = circuit_breaker
+        if request_circuit_breaker is None and cfg.circuit_breaker.enabled:
+            request_circuit_breaker = CircuitBreaker(cfg.circuit_breaker)
         request_processor = RequestProcessor(
-            request_queue, request_limiter, request_forwarder
+            request_queue,
+            request_limiter,
+            request_forwarder,
+            circuit_breaker=request_circuit_breaker,
         )
 
     @asynccontextmanager
@@ -142,15 +151,6 @@ def create_app(
                 model=str(raw_body.get("model", "")),
             ) from exc
 
-        # 2. Reject stream requests explicitly; they are out of scope for now.
-        if completion_request.stream:
-            logger.info("Stream requests are not supported yet")
-            raise ServiceUnavailableError(
-                message="Streaming is not supported yet",
-                llm_provider="smart-provider",
-                model=completion_request.model,
-            )
-
         # 3. Validate required fields that litellm marks as optional.
         if not completion_request.messages:
             logger.warning("Request missing messages field")
@@ -189,13 +189,21 @@ def create_app(
             max_wait_time_ms=cfg.queue_max_wait_ms,
         )
 
-        # 5. Submit to the pipeline and wait for the upstream result.
+        # 5. Submit to the pipeline and return the upstream result.
         logger.info(
-            "Request %s submitted (model=%s, client=%s)",
+            "Request %s submitted (model=%s, client=%s, stream=%s)",
             context.request_id,
             context.model,
             context.client_id,
+            context.stream,
         )
+
+        if context.stream:
+            stream_handle = await request_processor.submit_stream(context)
+            return StreamingResponse(
+                _sse_generator(stream_handle, context.request_id),
+                media_type="text/event-stream",
+            )
 
         try:
             future = await request_processor.submit(context)
@@ -238,6 +246,36 @@ def create_app(
             return await MetricsCollector().snapshot()
 
     return app
+
+
+async def _sse_generator(stream_handle, request_id: str):
+    """Convert a StreamHandle into Server-Sent Events.
+
+    Each upstream chunk becomes a ``data:`` line. If an error occurs during
+    streaming, an ``event: error`` frame is emitted before the final
+    ``data: [DONE]`` terminator. If the client disconnects, the StreamHandle
+    is cancelled so the worker stops consuming upstream chunks.
+    """
+    try:
+        async for chunk in stream_handle:
+            yield f"data: {json.dumps(chunk)}\n\n"
+    except asyncio.CancelledError:
+        logger.info("Request %s stream cancelled by client", request_id)
+        stream_handle.cancel()
+        raise
+    except Exception as exc:
+        logger.warning("Request %s streaming failed: %s", request_id, exc)
+        error_payload = {
+            "error": {
+                "message": str(exc),
+                "type": type(exc).__name__,
+            }
+        }
+        yield f"event: error\ndata: {json.dumps(error_payload)}\n\n"
+    finally:
+        if not stream_handle.is_closed:
+            stream_handle.cancel()
+    yield "data: [DONE]\n\n"
 
 
 def _status_code_for_litellm_exception(exc: Exception) -> int:
