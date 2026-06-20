@@ -111,6 +111,26 @@ flowchart TD
 
 ---
 
+## 配置
+
+Smart-Provider 通过环境变量或 `.env` 文件加载运行时配置。所有环境变量以 `SMART_PROVIDER_` 为前缀，启动时会进行类型与范围校验。
+
+最小示例：
+
+```bash
+export SMART_PROVIDER_UPSTREAM_URL=https://api.example.com/v1
+export SMART_PROVIDER_RATE_LIMIT_RPM=120
+```
+
+或在项目工作目录创建 `.env` 文件：
+
+```bash
+SMART_PROVIDER_UPSTREAM_URL=https://api.example.com/v1
+SMART_PROVIDER_RATE_LIMIT_RPM=120
+```
+
+完整配置说明参见 [docs/configuration.md](docs/configuration.md)，开发者扩展指南参见 [docs/config-module.md](docs/config-module.md)。
+
 ## 阶段性目标
 
 当前阶段，Smart-Provider 优先实现 **RPM 限速**，原因如下：
