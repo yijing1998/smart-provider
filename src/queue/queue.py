@@ -1,5 +1,6 @@
-"""Request queue interface and a simple in-memory implementation."""
+"""Request queue interface and an asyncio-based in-memory implementation."""
 
+import asyncio
 from dataclasses import dataclass
 from typing import Optional
 
@@ -22,32 +23,44 @@ class EnqueueResult:
 class RequestQueue:
     """In-memory FIFO request queue with a capacity limit.
 
-    This is a minimal stub implementation sufficient for the ingress layer
-    integration. The actual queueing policy and back-pressure semantics will
-    be refined when the dedicated queue module is implemented.
+    The queue is backed by :class:`asyncio.Queue` so that consumers can wait
+    asynchronously for new items. Producers still use a synchronous
+    :meth:`enqueue` since request admission happens in the HTTP handler.
     """
 
     def __init__(self, max_size: int = 1000) -> None:
         self._max_size = max_size
-        self._items: list[RequestContext] = []
+        self._queue: asyncio.Queue[RequestContext] = asyncio.Queue(
+            maxsize=max_size
+        )
 
     def enqueue(self, context: RequestContext) -> EnqueueResult:
         """Add a request context to the queue if capacity allows."""
-        if len(self._items) >= self._max_size:
+        try:
+            self._queue.put_nowait(context)
+        except asyncio.QueueFull:
             return EnqueueResult(success=False, queue_full=True)
-        self._items.append(context)
         return EnqueueResult(success=True)
 
-    def dequeue(self) -> Optional[RequestContext]:
-        """Remove and return the oldest context, if any."""
-        if not self._items:
+    async def dequeue(self) -> RequestContext:
+        """Remove and return the oldest context, waiting if necessary."""
+        return await self._queue.get()
+
+    def try_dequeue(self) -> Optional[RequestContext]:
+        """Remove and return the oldest context if one is available.
+
+        Returns None when the queue is empty. This is useful for callers that
+        need a non-blocking peek at the queue.
+        """
+        try:
+            return self._queue.get_nowait()
+        except asyncio.QueueEmpty:
             return None
-        return self._items.pop(0)
 
     def is_full(self) -> bool:
         """Return True when the queue has reached its capacity limit."""
-        return len(self._items) >= self._max_size
+        return self._queue.full()
 
     def size(self) -> int:
         """Return the current number of queued contexts."""
-        return len(self._items)
+        return self._queue.qsize()

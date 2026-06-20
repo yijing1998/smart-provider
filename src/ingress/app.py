@@ -8,7 +8,9 @@ remains with the forwarder module.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from contextlib import asynccontextmanager
 from typing import Any, Optional
 
 from fastapi import FastAPI, Header, Request
@@ -30,6 +32,8 @@ from pydantic import ValidationError
 from src.config import Config, load_config
 from src.forwarder import Forwarder
 from src.ingress.context import RequestContext
+from src.limiter import SlidingWindowRateLimiter
+from src.processor import RequestProcessor
 from src.queue import RequestQueue
 
 # Reuse litellm's logger namespace so ingress events appear alongside
@@ -40,7 +44,9 @@ logger = logging.getLogger("litellm")
 def create_app(
     config: Optional[Config] = None,
     queue: Optional[RequestQueue] = None,
+    limiter: Optional[SlidingWindowRateLimiter] = None,
     forwarder: Optional[Forwarder] = None,
+    processor: Optional[RequestProcessor] = None,
 ) -> FastAPI:
     """Create and configure the Ingress FastAPI application.
 
@@ -48,13 +54,26 @@ def create_app(
     to in-memory implementations configured from ``Config``.
     """
     cfg = config or load_config()
-    request_queue = queue or RequestQueue(max_size=cfg.queue.max_size)
-    request_forwarder = forwarder or Forwarder()
+    request_processor = processor
+    if request_processor is None:
+        request_queue = queue or RequestQueue(max_size=cfg.queue.max_size)
+        request_limiter = limiter or SlidingWindowRateLimiter(cfg.limiter)
+        request_forwarder = forwarder or Forwarder()
+        request_processor = RequestProcessor(
+            request_queue, request_limiter, request_forwarder
+        )
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> Any:
+        await request_processor.start()
+        yield
+        await request_processor.stop()
 
     app = FastAPI(
         title="Smart-Provider Ingress",
         version="0.1.0",
         docs_url="/docs",
+        lifespan=lifespan,
     )
 
     @app.exception_handler(BadRequestError)
@@ -166,27 +185,27 @@ def create_app(
             max_wait_time_ms=cfg.queue_max_wait_ms,
         )
 
-        # 5. Submit to the queue.
-        enqueue_result = request_queue.enqueue(context)
-        if not enqueue_result.success:
-            logger.warning("Queue full; rejecting request %s", context.request_id)
-            raise ServiceUnavailableError(
-                message="Request queue is full",
-                llm_provider="smart-provider",
-                model=context.model,
-            )
-
+        # 5. Submit to the pipeline and wait for the upstream result.
         logger.info(
-            "Request %s enqueued (model=%s, client=%s)",
+            "Request %s submitted (model=%s, client=%s)",
             context.request_id,
             context.model,
             context.client_id,
         )
 
-        # 6. Wait for the forwarder result and return it.
-        #    In the full system this will be async and may involve a rate
-        #    limiter; the stub forwarder returns immediately.
-        result = request_forwarder.forward(context)
+        try:
+            result = await asyncio.wait_for(
+                request_processor.submit(context),
+                timeout=context.max_wait_time_ms / 1000,
+            )
+        except asyncio.TimeoutError as exc:
+            logger.warning("Request %s timed out waiting for response", context.request_id)
+            raise Timeout(
+                message="Request timed out waiting for response",
+                llm_provider="smart-provider",
+                model=context.model,
+            ) from exc
+
         if result.error:
             logger.error(
                 "Request %s forwarding failed: %s",

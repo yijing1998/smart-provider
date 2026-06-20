@@ -1,9 +1,9 @@
-"""Upstream forwarder interface and a synchronous stub.
+"""Upstream forwarder interface and an asynchronous stub.
 
 The forwarder is responsible for sending dequeued requests to the upstream
-API and returning the response. This module only defines the interface and
-a stub implementation so the ingress layer can wait on a result without
-requiring the real forwarder to be implemented first.
+API and returning the response. This module defines the async interface and
+a stub implementation so the request pipeline can be wired up before the real
+upstream integration (using litellm) is implemented.
 """
 
 from dataclasses import dataclass
@@ -30,14 +30,14 @@ class ForwardResult:
 
 
 class Forwarder:
-    """Stub forwarder that immediately returns a synthetic success response.
+    """Stub forwarder that returns a synthetic success response.
 
-    This allows the ingress layer to be tested end-to-end before the real
+    This allows the request pipeline to be tested end-to-end before the real
     upstream forwarder (with timeout handling, error classification, and
     litellm upstream calls) is implemented.
     """
 
-    def forward(self, context: RequestContext) -> ForwardResult:
+    async def forward_async(self, context: RequestContext) -> ForwardResult:
         """Return a synthetic completion response for the given context."""
         return ForwardResult(
             status_code=200,
