@@ -20,8 +20,10 @@ from litellm.exceptions import (
 
 from src.config.schema import ForwarderConfig
 from src.ingress.context import RequestContext
+from src.observability import MetricsCollector
 
 logger = logging.getLogger("litellm")
+observability_logger = logging.getLogger("smart-provider")
 
 
 @dataclass(frozen=True)
@@ -82,8 +84,13 @@ class LitellmForwarder(Forwarder):
         InternalServerError,
     )
 
-    def __init__(self, config: ForwarderConfig) -> None:
+    def __init__(
+        self,
+        config: ForwarderConfig,
+        metrics: MetricsCollector | None = None,
+    ) -> None:
         self._config = config
+        self._metrics = metrics or MetricsCollector()
 
     async def forward_async(self, context: RequestContext) -> ForwardResult:
         """Forward the request to the configured upstream API.
@@ -131,6 +138,7 @@ class LitellmForwarder(Forwarder):
                 )
             except self._RETRYABLE_EXCEPTIONS as exc:
                 last_exception = exc
+                await self._record_upstream_error(exc)
                 logger.warning(
                     "Request %s attempt %d/%d failed with %s: %s",
                     context.request_id,
@@ -140,7 +148,10 @@ class LitellmForwarder(Forwarder):
                     exc,
                 )
             except APIError as exc:
-                # Other API errors (e.g., 400, 401, 404) are not retried.
+                # Other API errors (e.g., 400, 401, 404) are not retried,
+                # but 5xx-class APIError that is not already caught above
+                # should still be recorded.
+                await self._record_upstream_error(exc)
                 raise
 
             if attempt < max_attempts - 1:
@@ -158,6 +169,31 @@ class LitellmForwarder(Forwarder):
             raise last_exception
 
         raise RuntimeError("Unexpected end of retry loop")
+
+    async def _record_upstream_error(self, exc: APIError) -> None:
+        """Update metrics for upstream errors.
+
+        429 errors are tracked separately from 5xx/connection errors so that
+        operators can observe when the smoothing strategy is insufficient.
+        """
+        if isinstance(exc, RateLimitError):
+            await self._metrics.record_upstream_429()
+            observability_logger.warning(
+                "Upstream returned 429",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "status_code": getattr(exc, "status_code", 429),
+                },
+            )
+        else:
+            await self._metrics.record_upstream_5xx()
+            observability_logger.warning(
+                "Upstream returned 5xx or connection error",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "status_code": getattr(exc, "status_code", None),
+                },
+            )
 
     @staticmethod
     def _response_to_dict(response: Any) -> dict[str, Any]:

@@ -19,9 +19,11 @@ from src.forwarder import Forwarder
 from src.forwarder.forwarder import ForwardResult
 from src.ingress.context import RequestContext
 from src.limiter.rate_limiter import SlidingWindowRateLimiter
+from src.observability import MetricsCollector
 from src.queue import RequestQueue
 
 logger = logging.getLogger("litellm")
+observability_logger = logging.getLogger("smart-provider")
 
 
 class RequestProcessor:
@@ -41,14 +43,16 @@ class RequestProcessor:
         queue: RequestQueue,
         limiter: SlidingWindowRateLimiter,
         forwarder: Forwarder,
+        metrics: MetricsCollector | None = None,
     ) -> None:
         self._queue = queue
         self._limiter = limiter
         self._forwarder = forwarder
+        self._metrics = metrics or MetricsCollector()
         self._futures: dict[str, asyncio.Future] = {}
         self._task: asyncio.Task | None = None
 
-    def submit(self, context: RequestContext) -> asyncio.Future:
+    async def submit(self, context: RequestContext) -> asyncio.Future:
         """Submit a request context to the pipeline.
 
         Returns a Future that resolves with the upstream :class:`ForwardResult`
@@ -75,8 +79,24 @@ class RequestProcessor:
                     model=context.model,
                 )
             )
+        else:
+            await self._metrics.record_enqueue()
+            observability_logger.info(
+                "Request enqueued",
+                extra={
+                    "request_id": context.request_id,
+                    "client_id": context.client_id,
+                    "model": context.model,
+                    "queue_size": await self._current_queue_size(),
+                },
+            )
 
         return future
+
+    async def _current_queue_size(self) -> int:
+        """Return the current queue size from the metrics collector."""
+        snapshot = await self._metrics.snapshot()
+        return int(snapshot.get("queue_size", 0))
 
     async def start(self) -> None:
         """Start the background worker."""
@@ -101,6 +121,17 @@ class RequestProcessor:
                 waited_ms = (
                     datetime.now(timezone.utc) - context.enqueued_at
                 ).total_seconds() * 1000
+                await self._metrics.record_dequeue(waited_ms)
+                observability_logger.info(
+                    "Request dequeued",
+                    extra={
+                        "request_id": context.request_id,
+                        "client_id": context.client_id,
+                        "model": context.model,
+                        "wait_ms": waited_ms,
+                    },
+                )
+
                 if waited_ms > context.max_wait_time_ms:
                     logger.warning(
                         "Request %s timed out in queue after %.0f ms",
@@ -120,9 +151,27 @@ class RequestProcessor:
                 await self._limiter.acquire()
                 result = await self._forwarder.forward_async(context)
                 self._set_result(context.request_id, result)
+                observability_logger.info(
+                    "Request forwarded successfully",
+                    extra={
+                        "request_id": context.request_id,
+                        "client_id": context.client_id,
+                        "model": context.model,
+                        "status_code": result.status_code,
+                    },
+                )
             except Exception as exc:
                 logger.exception(
                     "Request %s processing failed", context.request_id
+                )
+                observability_logger.warning(
+                    "Request forwarding failed",
+                    extra={
+                        "request_id": context.request_id,
+                        "client_id": context.client_id,
+                        "model": context.model,
+                        "error_type": type(exc).__name__,
+                    },
                 )
                 self._set_exception(context.request_id, exc)
 

@@ -32,6 +32,7 @@ from pydantic import ValidationError
 from src.config import Config, load_config
 from src.forwarder import Forwarder, LitellmForwarder
 from src.ingress.context import RequestContext
+from src.observability import MetricsCollector
 from src.limiter import SlidingWindowRateLimiter
 from src.processor import RequestProcessor
 from src.queue import RequestQueue
@@ -54,6 +55,9 @@ def create_app(
     to in-memory implementations configured from ``Config``.
     """
     cfg = config or load_config()
+    logging.getLogger("smart-provider").setLevel(
+        getattr(logging, cfg.observability_log_level.upper(), logging.INFO)
+    )
     request_processor = processor
     if request_processor is None:
         request_queue = queue or RequestQueue(max_size=cfg.queue.max_size)
@@ -194,8 +198,9 @@ def create_app(
         )
 
         try:
+            future = await request_processor.submit(context)
             result = await asyncio.wait_for(
-                request_processor.submit(context),
+                future,
                 timeout=context.max_wait_time_ms / 1000,
             )
         except asyncio.TimeoutError as exc:
@@ -224,6 +229,13 @@ def create_app(
             result.status_code,
         )
         return JSONResponse(status_code=result.status_code, content=result.body)
+
+    if cfg.observability_metrics_enabled:
+
+        @app.get("/metrics")
+        async def metrics() -> Any:
+            """Expose runtime metrics snapshot."""
+            return await MetricsCollector().snapshot()
 
     return app
 

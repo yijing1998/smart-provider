@@ -10,8 +10,15 @@ from src.config.schema import LimiterConfig
 from src.forwarder import ForwardResult, Forwarder, StubForwarder
 from src.ingress.context import RequestContext
 from src.limiter import SlidingWindowRateLimiter
+from src.observability import MetricsCollector
 from src.processor import RequestProcessor
 from src.queue import RequestQueue
+
+
+@pytest.fixture(autouse=True)
+def reset_metrics() -> None:
+    """Reset the singleton metrics collector before each test."""
+    asyncio.run(MetricsCollector().reset())
 
 
 def _context(max_wait_time_ms: int = 30000) -> RequestContext:
@@ -63,7 +70,7 @@ class TestRequestProcessorSubmission:
         async def run() -> ForwardResult:
             await processor.start()
             try:
-                future = processor.submit(_context())
+                future = await processor.submit(_context())
                 return await asyncio.wait_for(future, timeout=1.0)
             finally:
                 await processor.stop()
@@ -82,7 +89,7 @@ class TestRequestProcessorSubmission:
         async def run() -> ForwardResult:
             await processor.start()
             try:
-                future = processor.submit(_context())
+                future = await processor.submit(_context())
                 return await asyncio.wait_for(future, timeout=1.0)
             finally:
                 await processor.stop()
@@ -106,7 +113,7 @@ class TestRequestProcessorRateLimiting:
                 messages=[{"role": "user", "content": "hello"}],
                 max_wait_time_ms=10000,
             )
-            future = processor.submit(context)
+            future = await processor.submit(context)
             await future
             completion_times[request_id] = time.monotonic()
 
@@ -157,7 +164,7 @@ class TestRequestProcessorWaitTimeout:
         async def run() -> None:
             await processor.start()
             try:
-                future = processor.submit(_context(max_wait_time_ms=50))
+                future = await processor.submit(_context(max_wait_time_ms=50))
                 with pytest.raises(Timeout):
                     await asyncio.wait_for(future, timeout=1.0)
             finally:
