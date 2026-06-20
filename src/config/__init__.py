@@ -1,5 +1,6 @@
 """Configuration management for Smart-Provider."""
 
-from .config import Config
+from .loader import load_config
+from .schema import Config
 
-__all__ = ["Config"]
+__all__ = ["Config", "load_config"]

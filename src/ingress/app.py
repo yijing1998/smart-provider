@@ -27,7 +27,7 @@ from litellm.exceptions import (
 from litellm.types.completion import CompletionRequest
 from pydantic import ValidationError
 
-from src.config import Config
+from src.config import Config, load_config
 from src.forwarder import Forwarder
 from src.ingress.context import RequestContext
 from src.queue import RequestQueue
@@ -47,8 +47,8 @@ def create_app(
     The dependencies can be injected for testing; in production they default
     to in-memory implementations configured from ``Config``.
     """
-    cfg = config or Config()
-    request_queue = queue or RequestQueue(max_size=cfg.queue_max_size)
+    cfg = config or load_config()
+    request_queue = queue or RequestQueue(max_size=cfg.queue.max_size)
     request_forwarder = forwarder or Forwarder()
 
     app = FastAPI(
@@ -163,7 +163,7 @@ def create_app(
             stream=bool(completion_request.stream),
             extra_body=_extra_body(completion_request),
             extra_headers=dict(request.headers) if request.headers else {},
-            max_wait_time_ms=cfg.forwarder_timeout_ms,
+            max_wait_time_ms=cfg.queue_max_wait_ms,
         )
 
         # 5. Submit to the queue.
