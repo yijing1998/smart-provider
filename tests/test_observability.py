@@ -119,6 +119,49 @@ class TestMetricsCollector:
         assert snapshot["streams_started_total"] == 2
         assert snapshot["streams_completed_total"] == 1
 
+    def test_prometheus_metrics_output(self):
+        metrics = MetricsCollector()
+
+        async def run():
+            await metrics.record_enqueue()
+            await metrics.record_dequeue(wait_ms=25.0)
+            await metrics.record_upstream_429()
+            await metrics.record_circuit_breaker_state("open", opened=True)
+            await metrics.record_stream_started()
+            await metrics.record_stream_completed()
+            await metrics.record_request_duration(0.5)
+            await metrics.record_forward_duration(0.3)
+            return metrics.prometheus_metrics()
+
+        output = _run(run())
+        text = output.decode("utf-8")
+
+        assert "smart_provider_queue_size" in text
+        assert "smart_provider_requests_enqueued_total" in text
+        assert "smart_provider_requests_processed_total" in text
+        assert "smart_provider_upstream_429_total" in text
+        assert "smart_provider_circuit_breaker_state" in text
+        assert "smart_provider_circuit_breaker_opens_total" in text
+        assert "smart_provider_streams_started_total" in text
+        assert "smart_provider_streams_completed_total" in text
+        assert "smart_provider_queue_wait_duration_seconds_bucket" in text
+        assert "smart_provider_request_duration_seconds_bucket" in text
+        assert "smart_provider_forward_duration_seconds_bucket" in text
+
+    def test_prometheus_circuit_breaker_state_values(self):
+        metrics = MetricsCollector()
+
+        async def run():
+            await metrics.record_circuit_breaker_state("open", opened=True)
+            await metrics.record_circuit_breaker_state("half_open")
+            await metrics.record_circuit_breaker_state("closed")
+            return metrics.prometheus_metrics()
+
+        output = _run(run())
+        text = output.decode("utf-8")
+
+        assert "smart_provider_circuit_breaker_state" in text
+
 
 class TestForwarderMetrics:
     """Verify that LitellmForwarder updates metrics on upstream errors."""

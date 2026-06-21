@@ -78,6 +78,7 @@ class Config(BaseSettings):
     # Queue
     queue_max_size: int = Field(default=1000, ge=1)
     queue_max_wait_ms: int = Field(default=30000, ge=1)
+    shutdown_drain_timeout_ms: int = Field(default=30000, ge=1)
 
     # Rate limiting
     rate_limit_rpm: int = Field(default=60, ge=1)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from contextlib import suppress
 from datetime import datetime, timezone
 
@@ -23,6 +24,7 @@ from src.ingress.stream_handle import StreamHandle
 from src.limiter.rate_limiter import SlidingWindowRateLimiter
 from src.observability import MetricsCollector
 from src.queue import RequestQueue
+from src.shutdown import ShutdownManager
 
 logger = logging.getLogger("litellm")
 observability_logger = logging.getLogger("smart-provider")
@@ -48,12 +50,14 @@ class RequestProcessor:
         forwarder: Forwarder,
         metrics: MetricsCollector | None = None,
         circuit_breaker: CircuitBreaker | None = None,
+        shutdown_manager: ShutdownManager | None = None,
     ) -> None:
         self._queue = queue
         self._limiter = limiter
         self._forwarder = forwarder
         self._metrics = metrics or MetricsCollector()
         self._circuit_breaker = circuit_breaker
+        self._shutdown_manager = shutdown_manager or ShutdownManager()
         self._futures: dict[str, asyncio.Future] = {}
         self._task: asyncio.Task | None = None
 
@@ -73,6 +77,17 @@ class RequestProcessor:
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
         self._futures[context.request_id] = future
+
+        if self._shutdown_manager.is_shutting_down:
+            self._futures.pop(context.request_id, None)
+            future.set_exception(
+                ServiceUnavailableError(
+                    message="Smart-Provider is shutting down",
+                    llm_provider="smart-provider",
+                    model=context.model,
+                )
+            )
+            return future
 
         enqueue_result = self._queue.enqueue(context)
         if not enqueue_result.success:
@@ -111,6 +126,13 @@ class RequestProcessor:
         Returns:
             A StreamHandle representing the eventual upstream stream.
         """
+        if self._shutdown_manager.is_shutting_down:
+            raise ServiceUnavailableError(
+                message="Smart-Provider is shutting down",
+                llm_provider="smart-provider",
+                model=context.model,
+            )
+
         enqueue_result = self._queue.enqueue(context)
         if not enqueue_result.success:
             raise ServiceUnavailableError(
@@ -173,6 +195,33 @@ class RequestProcessor:
         with suppress(asyncio.CancelledError):
             await self._task
         self._task = None
+
+    @property
+    def is_running(self) -> bool:
+        """Return True when the background worker is active."""
+        return self._task is not None and not self._task.done()
+
+    async def drain(self, timeout_seconds: float) -> None:
+        """Wait for the request queue to empty within the given timeout.
+
+        The background worker continues processing queued requests while
+        draining. New requests should already be rejected by the shutdown
+        manager before this method is called.
+        """
+        if self._task is None or self._queue.size() == 0:
+            return
+
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_seconds
+        while self._queue.size() > 0:
+            if loop.time() >= deadline:
+                logger.warning(
+                    "Drain timeout of %.2f seconds reached; %s requests remain",
+                    timeout_seconds,
+                    self._queue.size(),
+                )
+                break
+            await asyncio.sleep(0.05)
 
     async def _run(self) -> None:
         """Main worker loop."""
@@ -266,11 +315,18 @@ class RequestProcessor:
         previous_breaker_state: CircuitBreakerState | None,
     ) -> None:
         """Process a non-streaming request and resolve its Future."""
+        forward_start = time.perf_counter()
         result = await self._forwarder.forward_async(context)
+        forward_seconds = time.perf_counter() - forward_start
+        await self._metrics.record_forward_duration(forward_seconds)
         if self._circuit_breaker is not None:
             self._circuit_breaker.record_success()
         await self._update_circuit_breaker_metrics(previous_breaker_state)
         self._set_result(context.request_id, result)
+        total_seconds = (
+            datetime.now(timezone.utc) - context.enqueued_at
+        ).total_seconds()
+        await self._metrics.record_request_duration(total_seconds)
         observability_logger.info(
             "Request forwarded successfully",
             extra={
@@ -291,6 +347,7 @@ class RequestProcessor:
         if stream_handle is None:
             raise RuntimeError("Streaming request missing StreamHandle")
 
+        forward_start = time.perf_counter()
         try:
             async for chunk in self._forwarder.stream_async(context):
                 if stream_handle.is_cancelled:
@@ -304,9 +361,15 @@ class RequestProcessor:
                 self._circuit_breaker.record_exception(exc)
             stream_handle.put_error(exc)
         finally:
+            forward_seconds = time.perf_counter() - forward_start
+            await self._metrics.record_forward_duration(forward_seconds)
             await self._update_circuit_breaker_metrics(previous_breaker_state)
             stream_handle.close()
             await self._metrics.record_stream_completed()
+            total_seconds = (
+                datetime.now(timezone.utc) - context.enqueued_at
+            ).total_seconds()
+            await self._metrics.record_request_duration(total_seconds)
             observability_logger.info(
                 "Streaming request completed",
                 extra={

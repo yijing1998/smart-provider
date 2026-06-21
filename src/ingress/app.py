@@ -38,6 +38,7 @@ from src.observability import MetricsCollector
 from src.limiter import SlidingWindowRateLimiter
 from src.processor import RequestProcessor
 from src.queue import RequestQueue
+from src.shutdown import ShutdownManager
 
 # Reuse litellm's logger namespace so ingress events appear alongside
 # litellm logs when the same handlers are configured.
@@ -51,6 +52,7 @@ def create_app(
     forwarder: Optional[Forwarder] = None,
     processor: Optional[RequestProcessor] = None,
     circuit_breaker: Optional[CircuitBreaker] = None,
+    shutdown_manager: Optional[ShutdownManager] = None,
 ) -> FastAPI:
     """Create and configure the Ingress FastAPI application.
 
@@ -61,6 +63,7 @@ def create_app(
     logging.getLogger("smart-provider").setLevel(
         getattr(logging, cfg.observability_log_level.upper(), logging.INFO)
     )
+    request_shutdown_manager = shutdown_manager or ShutdownManager()
     request_processor = processor
     if request_processor is None:
         request_queue = queue or RequestQueue(max_size=cfg.queue.max_size)
@@ -74,12 +77,20 @@ def create_app(
             request_limiter,
             request_forwarder,
             circuit_breaker=request_circuit_breaker,
+            shutdown_manager=request_shutdown_manager,
         )
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> Any:
         await request_processor.start()
         yield
+        request_shutdown_manager.start_shutdown()
+        drain_timeout_seconds = cfg.shutdown_drain_timeout_ms / 1000
+        logger.info(
+            "Shutting down gracefully with drain timeout %.2f seconds",
+            drain_timeout_seconds,
+        )
+        await request_processor.drain(timeout_seconds=drain_timeout_seconds)
         await request_processor.stop()
 
     app = FastAPI(
@@ -88,6 +99,24 @@ def create_app(
         docs_url="/docs",
         lifespan=lifespan,
     )
+
+    @app.middleware("http")
+    async def _shutdown_middleware(request: Request, call_next) -> Any:
+        """Reject non-health-check requests while shutting down."""
+        if (
+            request_shutdown_manager.is_shutting_down
+            and request.url.path not in ("/health", "/ready")
+        ):
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "message": "Smart-Provider is shutting down",
+                        "type": "ServiceUnavailableError",
+                    }
+                },
+            )
+        return await call_next(request)
 
     @app.exception_handler(BadRequestError)
     @app.exception_handler(NotFoundError)
@@ -126,6 +155,26 @@ def create_app(
                 }
             },
         )
+
+    @app.get("/health")
+    async def health() -> dict[str, str]:
+        """Liveness probe: return whether the process is alive."""
+        return {"status": "healthy"}
+
+    @app.get("/ready")
+    async def ready() -> Any:
+        """Readiness probe: return whether the service is willing to receive traffic."""
+        if request_shutdown_manager.is_shutting_down:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "shutting_down"},
+            )
+        if not request_processor.is_running:
+            return JSONResponse(
+                status_code=503,
+                content={"status": "processor_not_running"},
+            )
+        return {"status": "ready"}
 
     @app.post("/v1/chat/completions")
     async def chat_completions(
@@ -244,6 +293,14 @@ def create_app(
         async def metrics() -> Any:
             """Expose runtime metrics snapshot."""
             return await MetricsCollector().snapshot()
+
+        @app.get("/metrics/prometheus")
+        async def prometheus_metrics() -> Any:
+            """Expose runtime metrics in Prometheus exposition format."""
+            return StreamingResponse(
+                content=iter([MetricsCollector().prometheus_metrics()]),
+                media_type="text/plain; version=0.0.4; charset=utf-8",
+            )
 
     return app
 

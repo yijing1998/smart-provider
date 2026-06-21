@@ -38,6 +38,7 @@ Smart-Provider 使用 [pydantic-settings](https://docs.pydantic.dev/projects/pyd
 | `SMART_PROVIDER_CLIENT_ID_HEADER` | `X-Client-Id` | 非空字符串 | 用于标识客户端的 HTTP Header 名称 |
 | `SMART_PROVIDER_QUEUE_MAX_SIZE` | `1000` | ≥1 | 请求队列最大容量 |
 | `SMART_PROVIDER_QUEUE_MAX_WAIT_MS` | `30000` | ≥1 | 请求在队列中最大等待时间（毫秒） |
+| `SMART_PROVIDER_SHUTDOWN_DRAIN_TIMEOUT_MS` | `30000` | ≥1 | 优雅关闭时队列排空超时（毫秒） |
 | `SMART_PROVIDER_RATE_LIMIT_RPM` | `60` | ≥1 | 每分钟最大请求数（RPM） |
 | `SMART_PROVIDER_RATE_LIMIT_TPM` | 未设置 | 可选，≥1 | 每分钟最大 Token 数（TPM），当前预留 |
 | `SMART_PROVIDER_RATE_LIMIT_WINDOW_SECONDS` | `60` | ≥1 | RPM 滑动窗口宽度（秒） |

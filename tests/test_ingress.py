@@ -12,6 +12,7 @@ from src.forwarder import ForwardResult, Forwarder, StubForwarder
 from src.ingress.app import _status_code_for_litellm_exception, create_app
 from src.ingress.context import RequestContext
 from src.queue import RequestQueue
+from src.shutdown import ShutdownManager
 
 
 def _valid_chat_request() -> dict:
@@ -296,6 +297,113 @@ class TestStreamingIntegration:
             )
 
         assert response.status_code == 503
+
+
+class TestHealthEndpoints:
+    """Verify health and readiness endpoints."""
+
+    def test_health_returns_200(self):
+        app = create_app(forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            response = client.get("/health")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "healthy"
+
+    def test_ready_returns_200_when_running(self):
+        app = create_app(forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            response = client.get("/ready")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "ready"
+
+    def test_health_always_exposed_even_when_metrics_disabled(self):
+        config = Config(observability_metrics_enabled=False)
+        app = create_app(config=config, forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            health_response = client.get("/health")
+            ready_response = client.get("/ready")
+
+        assert health_response.status_code == 200
+        assert ready_response.status_code == 200
+
+
+class TestPrometheusMetricsEndpoint:
+    """Verify Prometheus metrics endpoint."""
+
+    def test_prometheus_endpoint_exposed_when_enabled(self):
+        config = Config(observability_metrics_enabled=True)
+        app = create_app(config=config, forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            response = client.get("/metrics/prometheus")
+
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/plain")
+        assert "smart_provider_requests_enqueued_total" in response.text
+
+    def test_prometheus_endpoint_hidden_when_disabled(self):
+        config = Config(observability_metrics_enabled=False)
+        app = create_app(config=config, forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            response = client.get("/metrics/prometheus")
+
+        assert response.status_code == 404
+
+    def test_prometheus_endpoint_reflects_processed_request(self):
+        config = Config(observability_metrics_enabled=True)
+        app = create_app(config=config, forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            client.post(
+                "/v1/chat/completions",
+                json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+            )
+            response = client.get("/metrics/prometheus")
+
+        assert response.status_code == 200
+        assert "smart_provider_requests_processed_total" in response.text
+        assert "smart_provider_requests_enqueued_total" in response.text
+
+
+class TestGracefulShutdownIntegration:
+    """Verify graceful shutdown behavior through the ingress layer."""
+
+    def test_shutdown_rejects_new_requests(self):
+        shutdown_manager = ShutdownManager()
+        app = create_app(
+            forwarder=StubForwarder(), shutdown_manager=shutdown_manager
+        )
+
+        with TestClient(app) as client:
+            shutdown_manager.start_shutdown()
+            response = client.post(
+                "/v1/chat/completions",
+                json={"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]},
+            )
+
+        assert response.status_code == 503
+        assert "shutting down" in response.json()["error"]["message"].lower()
+
+    def test_health_check_still_works_during_shutdown(self):
+        shutdown_manager = ShutdownManager()
+        app = create_app(
+            forwarder=StubForwarder(), shutdown_manager=shutdown_manager
+        )
+
+        with TestClient(app) as client:
+            shutdown_manager.start_shutdown()
+            health_response = client.get("/health")
+            ready_response = client.get("/ready")
+
+        assert health_response.status_code == 200
+        assert ready_response.status_code == 503
+        assert ready_response.json()["status"] == "shutting_down"
 
 
 if __name__ == "__main__":

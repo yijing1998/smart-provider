@@ -14,6 +14,7 @@ from src.limiter import SlidingWindowRateLimiter
 from src.observability import MetricsCollector
 from src.processor import RequestProcessor
 from src.queue import RequestQueue
+from src.shutdown import ShutdownManager
 
 
 @pytest.fixture(autouse=True)
@@ -35,6 +36,7 @@ def _make_processor(
     window_seconds: int = 1,
     forwarder: Forwarder | None = None,
     circuit_breaker: CircuitBreaker | None = None,
+    shutdown_manager: ShutdownManager | None = None,
 ) -> RequestProcessor:
     queue = RequestQueue(max_size=10)
     limiter = SlidingWindowRateLimiter(
@@ -45,6 +47,7 @@ def _make_processor(
         limiter=limiter,
         forwarder=forwarder or StubForwarder(),
         circuit_breaker=circuit_breaker,
+        shutdown_manager=shutdown_manager,
     )
 
 
@@ -359,6 +362,120 @@ class TestRequestProcessorStreaming:
 
                 elapsed = time.monotonic() - start
                 assert elapsed >= window_seconds - 0.05
+            finally:
+                await processor.stop()
+
+        asyncio.run(run())
+
+
+class TestRequestProcessorRunningState:
+    """Verify is_running and shutdown rejection behavior."""
+
+    def test_is_running_true_when_started(self):
+        processor = _make_processor()
+
+        async def run() -> None:
+            await processor.start()
+            try:
+                assert processor.is_running is True
+            finally:
+                await processor.stop()
+
+        asyncio.run(run())
+
+    def test_is_running_false_when_stopped(self):
+        processor = _make_processor()
+
+        async def run() -> None:
+            await processor.start()
+            await processor.stop()
+            assert processor.is_running is False
+
+        asyncio.run(run())
+
+    def test_submit_rejected_when_shutting_down(self):
+        shutdown_manager = ShutdownManager()
+        processor = _make_processor(shutdown_manager=shutdown_manager)
+
+        async def run() -> None:
+            await processor.start()
+            try:
+                shutdown_manager.start_shutdown()
+                future = await processor.submit(_context())
+                with pytest.raises(ServiceUnavailableError, match="shutting down"):
+                    await asyncio.wait_for(future, timeout=1.0)
+            finally:
+                await processor.stop()
+
+        asyncio.run(run())
+
+    def test_submit_stream_rejected_when_shutting_down(self):
+        shutdown_manager = ShutdownManager()
+        processor = _make_processor(shutdown_manager=shutdown_manager)
+
+        async def run() -> None:
+            await processor.start()
+            try:
+                shutdown_manager.start_shutdown()
+                with pytest.raises(ServiceUnavailableError, match="shutting down"):
+                    await processor.submit_stream(_context())
+            finally:
+                await processor.stop()
+
+        asyncio.run(run())
+
+
+class TestRequestProcessorDrain:
+    """Verify graceful drain behavior."""
+
+    def test_drain_empties_queue(self):
+        processor = _make_processor()
+
+        async def run() -> None:
+            await processor.start()
+            try:
+                futures = [
+                    await processor.submit(_context()) for _ in range(3)
+                ]
+                await processor.drain(timeout_seconds=2.0)
+                assert processor._queue.size() == 0
+                results = await asyncio.gather(*futures)
+                assert all(r.status_code == 200 for r in results)
+            finally:
+                await processor.stop()
+
+        asyncio.run(run())
+
+    def test_drain_returns_when_queue_already_empty(self):
+        processor = _make_processor()
+
+        async def run() -> None:
+            await processor.start()
+            try:
+                await processor.drain(timeout_seconds=1.0)
+                assert processor._queue.size() == 0
+            finally:
+                await processor.stop()
+
+        asyncio.run(run())
+
+    def test_drain_respects_timeout(self):
+        class SlowQueue(RequestQueue):
+            """A queue that never reports empty so drain must time out."""
+
+            def size(self) -> int:
+                return 1
+
+        processor = _make_processor()
+        processor._queue = SlowQueue(max_size=10)
+
+        async def run() -> None:
+            await processor.start()
+            try:
+                start = time.monotonic()
+                await processor.drain(timeout_seconds=0.1)
+                elapsed = time.monotonic() - start
+                assert elapsed >= 0.1
             finally:
                 await processor.stop()
 
