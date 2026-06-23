@@ -106,6 +106,84 @@ class TestRequestParsingAndContext:
 
         assert response.status_code == 200
 
+    def test_function_calling_request_returns_200(self):
+        captured_contexts: list[RequestContext] = []
+
+        class CapturingQueue(RequestQueue):
+            def enqueue(self, context: RequestContext):
+                captured_contexts.append(context)
+                return super().enqueue(context)
+
+        queue = CapturingQueue(max_size=10)
+        app = create_app(queue=queue, forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "gpt-4o",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": {
+                                "name": "bash",
+                                "description": "Run a shell command",
+                                "parameters": {
+                                    "type": "object",
+                                    "properties": {
+                                        "command": {"type": "string"},
+                                    },
+                                    "required": ["command"],
+                                },
+                            },
+                        }
+                    ],
+                    "tool_choice": "auto",
+                },
+            )
+
+        assert response.status_code == 200
+        assert len(captured_contexts) == 1
+        assert captured_contexts[0].extra_body["tools"] == [
+            {
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "Run a shell command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"},
+                        },
+                        "required": ["command"],
+                    },
+                },
+            }
+        ]
+        assert captured_contexts[0].extra_body["tool_choice"] == "auto"
+
+    def test_invalid_tool_format_returns_400(self):
+        app = create_app(forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "gpt-4o",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "tools": [
+                        {
+                            "type": "function",
+                            "function": "this-should-be-an-object-not-a-string",
+                        }
+                    ],
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["error"]["type"] == "BadRequestError"
+
     def test_model_with_slash_is_still_prefixed(self):
         captured_contexts: list[RequestContext] = []
 

@@ -1,9 +1,9 @@
 """FastAPI application implementing the Smart-Provider ingress layer.
 
-This module relies on the litellm SDK for OpenAI-compatible request parsing,
-model validation, exception classification, and logging. It does not use
-litellm's completion functions for upstream forwarding; that responsibility
-remains with the forwarder module.
+This module uses an adapter layer for OpenAI-compatible request parsing,
+relies on the litellm SDK for model validation, exception classification, and
+logging, and does not use litellm's completion functions for upstream
+forwarding; that responsibility remains with the forwarder module.
 """
 
 from __future__ import annotations
@@ -28,13 +28,14 @@ from litellm.exceptions import (
     ServiceUnavailableError,
     Timeout,
 )
-from litellm.types.completion import CompletionRequest
 from pydantic import ValidationError
 
 from src.circuit_breaker import CircuitBreaker
 from src.config import Config, load_config
 from src.forwarder import Forwarder, LitellmForwarder
+from src.ingress.adapters.openai import adapt
 from src.ingress.context import RequestContext
+from src.ingress.models import SmartProviderCompletionRequest
 from src.observability import MetricsCollector
 from src.limiter import SlidingWindowRateLimiter
 from src.processor import RequestProcessor
@@ -225,15 +226,15 @@ def create_app(
     ) -> Any:
         """Receive an OpenAI-compatible chat completion request.
 
-        The request body is parsed with litellm's CompletionRequest, the model
-        is validated via litellm model info, and the request is converted into
-        the internal RequestContext and submitted to the queue.
+        The request body is adapted to Smart-Provider's internal request model,
+        the model is validated via litellm model info, and the request is
+        converted into the internal RequestContext and submitted to the queue.
         """
         raw_body = await request.json()
 
-        # 1. Parse using litellm's OpenAI-compatible request type.
+        # 1. Adapt the raw OpenAI-compatible request body to the internal model.
         try:
-            completion_request = CompletionRequest(**raw_body)
+            completion_request = adapt(raw_body)
         except ValidationError as exc:
             logger.warning("Failed to parse completion request: %s", exc)
             raise BadRequestError(
@@ -242,7 +243,7 @@ def create_app(
                 model=str(raw_body.get("model", "")),
             ) from exc
 
-        # 3. Validate required fields that litellm marks as optional.
+        # 2. Validate required fields.
         if not completion_request.messages:
             logger.warning("Request missing messages field")
             raise BadRequestError(
@@ -251,22 +252,18 @@ def create_app(
                 model=completion_request.model,
             )
 
-        # 4. Prepend the configured upstream litellm provider and validate the
+        # 3. Prepend the configured upstream litellm provider and validate the
         # resulting model name. The client never needs to know litellm's
         # provider-prefixed convention.
         model = f"{cfg.upstream_litellm_provider}/{completion_request.model}"
         _validate_model_name(model)
 
-        # 5. Build the internal request context.
-        #    litellm may represent messages as dicts or Pydantic models depending
-        #    on configuration; normalize to plain dicts.
-        messages = [
-            msg.model_dump(mode="json") if hasattr(msg, "model_dump") else msg
-            for msg in completion_request.messages
-        ]
+        # 4. Build the internal request context.
+        #    Messages are already plain dicts in the internal model; tools and
+        #    other OpenAI fields are dumped to dicts for upstream passthrough.
         context = RequestContext(
             model=model,
-            messages=messages,
+            messages=completion_request.messages,
             client_id=x_client_id or "default",
             upstream_target=cfg.upstream_url,
             stream=bool(completion_request.stream),
@@ -409,8 +406,8 @@ _CONTROLLED_FIELDS = {
 }
 
 
-def _extra_body(completion_request: CompletionRequest) -> dict[str, Any]:
-    """Extract non-core fields from the litellm request for upstream passthrough.
+def _extra_body(completion_request: SmartProviderCompletionRequest) -> dict[str, Any]:
+    """Extract non-core fields from the internal request for upstream passthrough.
 
     All fields explicitly provided by the client are forwarded to the upstream
     request body, except for fields that Smart-Provider controls directly
