@@ -14,7 +14,7 @@ from typing import Any, AsyncIterator
 import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from httpx2 import ASGITransport, AsyncClient
 
 from src.config import Config
 from src.forwarder import Forwarder, ForwardResult
