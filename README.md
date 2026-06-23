@@ -8,6 +8,32 @@ Smart-Provider 是一个模型 API 请求代理，位于客户端与真实 API E
 
 ---
 
+## 快速开始
+
+5 分钟内在本地跑通第一个请求：
+
+```bash
+# 1. 安装依赖
+.venv/bin/python -m pip install -e .
+
+# 2. 复制并编辑配置
+cp .env.example .env
+# 修改 .env：填写上游 API 地址与 RPM 限制
+
+# 3. 启动服务
+.venv/bin/python -m uvicorn src.ingress.app:create_app --factory --host 0.0.0.0 --port 8080
+
+# 4. 发送第一个请求
+curl http://localhost:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENAI_API_KEY" \
+  -d '{"model":"gpt-4o","messages":[{"role":"user","content":"你好"}]}'
+```
+
+完整入门指南参见 [docs/quickstart.md](docs/quickstart.md)。
+
+---
+
 ## 为什么需要 Smart-Provider
 
 在直接调用模型 API 时，如果客户端并发较高或突发流量较大，上游 API 很容易返回 `429` 限流响应。一旦触发限流，客户端通常会自动重试，而重试又会进一步增加请求密度，形成恶性循环：
