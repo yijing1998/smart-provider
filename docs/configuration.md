@@ -73,6 +73,7 @@ export SMART_PROVIDER_ENV_FILE=prod.env
 | 环境变量 | 默认值 | 校验规则 | 说明 |
 |----------|--------|----------|------|
 | `SMART_PROVIDER_UPSTREAM_URL` | `https://api.openai.com/v1` | 非空字符串 | 真实上游 API Endpoint 地址 |
+| `SMART_PROVIDER_UPSTREAM_LITELLM_PROVIDER` | `openai` | 必须是 `LITELLM_CHAT_PROVIDERS` 中的 provider | 上游在 litellm 中的 provider 名称，用于为客户端发来的裸模型名自动添加前缀 |
 | `SMART_PROVIDER_SERVER_PORT` | `8080` | 1–65535 | 服务监听端口 |
 | `SMART_PROVIDER_CLIENT_ID_HEADER` | `X-Client-Id` | 非空字符串 | 用于标识客户端的 HTTP Header 名称 |
 | `SMART_PROVIDER_QUEUE_MAX_SIZE` | `1000` | ≥1 | 请求队列最大容量 |
@@ -146,6 +147,7 @@ data: [DONE]
 
 ```bash
 SMART_PROVIDER_UPSTREAM_URL=https://api.example.com/v1
+SMART_PROVIDER_UPSTREAM_LITELLM_PROVIDER=openai
 SMART_PROVIDER_RATE_LIMIT_RPM=120
 SMART_PROVIDER_QUEUE_MAX_SIZE=2000
 SMART_PROVIDER_OBSERVABILITY_LOG_LEVEL=DEBUG

@@ -2,6 +2,7 @@
 
 from typing import Optional
 
+from litellm import LITELLM_CHAT_PROVIDERS
 from pydantic import BaseModel, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -74,6 +75,7 @@ class Config(BaseSettings):
 
     # Upstream target
     upstream_url: str = Field(default="https://api.openai.com/v1", min_length=1)
+    upstream_litellm_provider: str = Field(default="openai", min_length=1)
 
     # Queue
     queue_max_size: int = Field(default=1000, ge=1)
@@ -102,6 +104,17 @@ class Config(BaseSettings):
     # Distributed rate limiter (reserved for future use)
     distributed_rate_limiter_enabled: bool = False
     distributed_rate_limiter_url: Optional[str] = None
+
+    @field_validator("upstream_litellm_provider")
+    @classmethod
+    def _validate_upstream_litellm_provider(cls, value: str) -> str:
+        """Validate that the provider is known to litellm."""
+        if value not in LITELLM_CHAT_PROVIDERS:
+            raise ValueError(
+                f"upstream_litellm_provider must be one of {LITELLM_CHAT_PROVIDERS}, "
+                f"got {value!r}"
+            )
+        return value
 
     @field_validator("observability_log_level")
     @classmethod

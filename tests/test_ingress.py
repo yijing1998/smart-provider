@@ -52,7 +52,7 @@ class TestRequestParsingAndContext:
 
         assert response.status_code == 200
         body = response.json()
-        assert body["model"] == "gpt-4o"
+        assert body["model"] == "openai/gpt-4o"
         assert body["choices"][0]["message"]["content"] == "pong"
         assert queue.size() == 0
 
@@ -68,8 +68,16 @@ class TestRequestParsingAndContext:
         assert response.status_code == 400
         assert response.json()["error"]["type"] == "BadRequestError"
 
-    def test_unknown_model_returns_404(self):
-        app = create_app(forwarder=StubForwarder())
+    def test_bare_model_name_is_prefixed(self):
+        captured_contexts: list[RequestContext] = []
+
+        class CapturingQueue(RequestQueue):
+            def enqueue(self, context: RequestContext):
+                captured_contexts.append(context)
+                return super().enqueue(context)
+
+        queue = CapturingQueue(max_size=10)
+        app = create_app(queue=queue, forwarder=StubForwarder())
 
         with TestClient(app) as client:
             response = client.post(
@@ -80,7 +88,9 @@ class TestRequestParsingAndContext:
                 },
             )
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert len(captured_contexts) == 1
+        assert captured_contexts[0].model == "openai/this-model-does-not-exist"
 
     def test_provider_prefixed_model_returns_200(self):
         app = create_app(forwarder=StubForwarder())
@@ -96,19 +106,86 @@ class TestRequestParsingAndContext:
 
         assert response.status_code == 200
 
-    def test_provider_prefixed_unknown_provider_returns_404(self):
-        app = create_app(forwarder=StubForwarder())
+    def test_model_with_slash_is_still_prefixed(self):
+        captured_contexts: list[RequestContext] = []
+
+        class CapturingQueue(RequestQueue):
+            def enqueue(self, context: RequestContext):
+                captured_contexts.append(context)
+                return super().enqueue(context)
+
+        queue = CapturingQueue(max_size=10)
+        app = create_app(queue=queue, forwarder=StubForwarder())
 
         with TestClient(app) as client:
             response = client.post(
                 "/v1/chat/completions",
                 json={
-                    "model": "not-a-provider/z-ai/glm-5.1",
+                    "model": "z-ai/glm-5.1",
                     "messages": [{"role": "user", "content": "hello"}],
                 },
             )
 
-        assert response.status_code == 404
+        assert response.status_code == 200
+        assert len(captured_contexts) == 1
+        assert captured_contexts[0].model == "openai/z-ai/glm-5.1"
+
+    def test_custom_upstream_provider_is_used_as_prefix(self):
+        captured_contexts: list[RequestContext] = []
+
+        class CapturingQueue(RequestQueue):
+            def enqueue(self, context: RequestContext):
+                captured_contexts.append(context)
+                return super().enqueue(context)
+
+        config = Config(upstream_litellm_provider="azure")
+        queue = CapturingQueue(max_size=10)
+        app = create_app(config=config, queue=queue, forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "gpt-4o",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+        assert response.status_code == 200
+        assert len(captured_contexts) == 1
+        assert captured_contexts[0].model == "azure/gpt-4o"
+
+    def test_custom_request_parameters_are_passed_through(self):
+        captured_contexts: list[RequestContext] = []
+
+        class CapturingQueue(RequestQueue):
+            def enqueue(self, context: RequestContext):
+                captured_contexts.append(context)
+                return super().enqueue(context)
+
+        queue = CapturingQueue(max_size=10)
+        app = create_app(queue=queue, forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "gpt-4o",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "temperature": 0.7,
+                    "max_tokens": 100,
+                    "chat_template_kwargs": {"foo": "bar"},
+                },
+            )
+
+        assert response.status_code == 200
+        assert len(captured_contexts) == 1
+        assert captured_contexts[0].extra_body["temperature"] == 0.7
+        assert captured_contexts[0].extra_body["max_tokens"] == 100
+        assert captured_contexts[0].extra_body["chat_template_kwargs"] == {"foo": "bar"}
+        assert "model" not in captured_contexts[0].extra_body
+        assert "messages" not in captured_contexts[0].extra_body
+        assert "stream" not in captured_contexts[0].extra_body
 
     def test_stream_request_returns_sse(self):
         app = create_app(forwarder=StubForwarder())
@@ -147,7 +224,7 @@ class TestRequestParsingAndContext:
 
         assert len(captured_contexts) == 1
         assert captured_contexts[0].client_id == "client-42"
-        assert captured_contexts[0].model == "gpt-4o"
+        assert captured_contexts[0].model == "openai/gpt-4o"
         assert captured_contexts[0].request_id
         assert captured_contexts[0].enqueued_at
 

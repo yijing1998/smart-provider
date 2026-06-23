@@ -17,6 +17,7 @@ class TestConfigDefaults:
         cfg = Config()
 
         assert cfg.upstream_url == "https://api.openai.com/v1"
+        assert cfg.upstream_litellm_provider == "openai"
         assert cfg.server_port == 8080
         assert cfg.client_id_header == "X-Client-Id"
         assert cfg.queue_max_size == 1000
@@ -48,6 +49,11 @@ class TestConfigEnvironmentVariables:
         monkeypatch.setenv("SMART_PROVIDER_UPSTREAM_URL", "https://custom.example.com/v1")
         cfg = load_config()
         assert cfg.upstream_url == "https://custom.example.com/v1"
+
+    def test_upstream_litellm_provider_from_env(self, monkeypatch):
+        monkeypatch.setenv("SMART_PROVIDER_UPSTREAM_LITELLM_PROVIDER", "azure")
+        cfg = load_config()
+        assert cfg.upstream_litellm_provider == "azure"
 
     def test_queue_max_size_from_env(self, monkeypatch):
         monkeypatch.setenv("SMART_PROVIDER_QUEUE_MAX_SIZE", "500")
@@ -219,6 +225,10 @@ class TestConfigValidation:
     def test_empty_upstream_url_is_rejected(self):
         with pytest.raises(ValidationError):
             Config(upstream_url="")
+
+    def test_invalid_upstream_litellm_provider_is_rejected(self):
+        with pytest.raises(ValidationError):
+            Config(upstream_litellm_provider="not-a-provider")
 
 
 class TestConfigComponentViews:

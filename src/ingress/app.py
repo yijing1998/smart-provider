@@ -251,10 +251,11 @@ def create_app(
                 model=completion_request.model,
             )
 
-        # 4. Validate the model. Provider-prefixed names (e.g. openai/z-ai/glm-5.1)
-        # are accepted if litellm recognizes the provider; otherwise fall back to
-        # litellm's static model info table.
-        _validate_model_name(completion_request.model)
+        # 4. Prepend the configured upstream litellm provider and validate the
+        # resulting model name. The client never needs to know litellm's
+        # provider-prefixed convention.
+        model = f"{cfg.upstream_litellm_provider}/{completion_request.model}"
+        _validate_model_name(model)
 
         # 5. Build the internal request context.
         #    litellm may represent messages as dicts or Pydantic models depending
@@ -264,7 +265,7 @@ def create_app(
             for msg in completion_request.messages
         ]
         context = RequestContext(
-            model=completion_request.model,
+            model=model,
             messages=messages,
             client_id=x_client_id or "default",
             upstream_target=cfg.upstream_url,
@@ -392,25 +393,31 @@ def _status_code_for_litellm_exception(exc: Exception) -> int:
     return 500
 
 
+# Fields that Smart-Provider controls directly and should never be passed
+# through to the upstream request body. Client-provided values for these
+# fields are ignored because they could conflict with Smart-Provider's
+# forwarding logic or the configured upstream target.
+_CONTROLLED_FIELDS = {
+    "model",
+    "messages",
+    "stream",
+    "base_url",
+    "api_key",
+    "api_version",
+    "timeout",
+    "model_list",
+}
+
+
 def _extra_body(completion_request: CompletionRequest) -> dict[str, Any]:
-    """Extract non-core fields from the litellm request for upstream passthrough."""
-    extra: dict[str, Any] = {}
-    if completion_request.temperature is not None:
-        extra["temperature"] = completion_request.temperature
-    if completion_request.max_tokens is not None:
-        extra["max_tokens"] = completion_request.max_tokens
-    if completion_request.top_p is not None:
-        extra["top_p"] = completion_request.top_p
-    if completion_request.n is not None:
-        extra["n"] = completion_request.n
-    if completion_request.stop is not None:
-        extra["stop"] = completion_request.stop
-    if completion_request.seed is not None:
-        extra["seed"] = completion_request.seed
-    if completion_request.tools is not None:
-        extra["tools"] = [
-            tool.model_dump(mode="json") for tool in completion_request.tools
-        ]
-    if completion_request.tool_choice is not None:
-        extra["tool_choice"] = completion_request.tool_choice
-    return extra
+    """Extract non-core fields from the litellm request for upstream passthrough.
+
+    All fields explicitly provided by the client are forwarded to the upstream
+    request body, except for fields that Smart-Provider controls directly
+    (``model``, ``messages``, ``stream``, plus litellm internal fields such as
+    ``base_url`` and ``api_key``). This allows arbitrary upstream-specific
+    parameters such as ``chat_template_kwargs`` to pass through without
+    maintaining a fixed whitelist.
+    """
+    body = completion_request.model_dump(exclude_unset=True)
+    return {k: v for k, v in body.items() if k not in _CONTROLLED_FIELDS}
