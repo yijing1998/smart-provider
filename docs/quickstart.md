@@ -47,7 +47,27 @@ SMART_PROVIDER_RATE_LIMIT_RPM=60
 
 ---
 
-## 3. 启动服务
+## 3. 使用自定义配置文件（可选）
+
+如果你不希望使用 `.env`，也可以通过以下任一方式指定其他 env 文件：
+
+```bash
+# 方式一：通过环境变量
+SMART_PROVIDER_ENV_FILE=prod.env .venv/bin/python -m uvicorn src.ingress.app:create_app --factory
+
+# 方式二：通过 CLI 参数
+.venv/bin/python -m uvicorn src.ingress.app:create_app --factory --env-file prod.env
+```
+
+优先级：`--env-file` > `SMART_PROVIDER_ENV_FILE` > `.env`。自定义 env 文件会替代默认 `.env`，而不是与其合并。
+
+> 通过 `SMART_PROVIDER_ENV_FILE` 或 `--env-file` 显式指定的文件不存在时，服务会启动失败；默认 `.env` 不存在时则仍使用默认值启动。
+
+更多说明参见 [docs/configuration.md](configuration.md)。
+
+---
+
+## 4. 启动服务
 
 ```bash
 .venv/bin/python -m uvicorn src.ingress.app:create_app --factory --host 0.0.0.0 --port 8080
@@ -64,7 +84,7 @@ INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
 
 ---
 
-## 4. 发送第一个请求
+## 5. 发送第一个请求
 
 Smart-Provider 暴露 OpenAI 兼容的 `POST /v1/chat/completions` 端点。你只需要把原本发给上游 API 的请求原样发给 Smart-Provider，`Authorization` 等请求头会自动透传给上游。
 
@@ -118,7 +138,7 @@ data: [DONE]
 
 ---
 
-## 5. 检查服务健康状态
+## 6. 检查服务健康状态
 
 Smart-Provider 提供两个健康检查端点：
 
@@ -150,7 +170,7 @@ curl http://localhost:8080/ready
 
 ---
 
-## 6. 验证限速是否生效
+## 7. 验证限速是否生效
 
 将 `SMART_PROVIDER_RATE_LIMIT_RPM` 设为一个较小的值（例如 `5`），然后快速并发发送多个请求：
 

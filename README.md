@@ -30,7 +30,7 @@ curl http://localhost:8080/v1/chat/completions \
   -d '{"model":"gpt-4o","messages":[{"role":"user","content":"你好"}]}'
 ```
 
-完整入门指南参见 [docs/quickstart.md](docs/quickstart.md)。
+完整入门指南（含自定义 env 配置文件用法）参见 [docs/quickstart.md](docs/quickstart.md)。
 
 ---
 
