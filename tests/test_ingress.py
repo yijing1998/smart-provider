@@ -82,6 +82,34 @@ class TestRequestParsingAndContext:
 
         assert response.status_code == 404
 
+    def test_provider_prefixed_model_returns_200(self):
+        app = create_app(forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "openai/z-ai/glm-5.1",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+        assert response.status_code == 200
+
+    def test_provider_prefixed_unknown_provider_returns_404(self):
+        app = create_app(forwarder=StubForwarder())
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "not-a-provider/z-ai/glm-5.1",
+                    "messages": [{"role": "user", "content": "hello"}],
+                },
+            )
+
+        assert response.status_code == 404
+
     def test_stream_request_returns_sse(self):
         app = create_app(forwarder=StubForwarder())
 

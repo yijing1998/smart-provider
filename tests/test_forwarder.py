@@ -92,6 +92,87 @@ class TestLitellmForwarderSuccess:
         assert call_kwargs["max_tokens"] == 100
 
 
+    @patch("src.forwarder.forwarder.litellm.acompletion", new_callable=AsyncMock)
+    def test_authorization_bearer_token_is_passed_as_api_key(self, mock_acompletion):
+        mock_acompletion.return_value = _FakeResponse({"ok": True})
+        forwarder = LitellmForwarder(_make_config())
+        context = RequestContext(
+            model="openai/z-ai/glm-5.1",
+            messages=[{"role": "user", "content": "hello"}],
+            upstream_target="https://integrate.api.nvidia.com/v1",
+            extra_headers={"Authorization": "Bearer secret-nvidia-key"},
+        )
+
+        async def run():
+            return await forwarder.forward_async(context)
+
+        result = asyncio.run(run())
+
+        assert result.status_code == 200
+        call_kwargs = mock_acompletion.await_args.kwargs
+        assert call_kwargs["api_key"] == "secret-nvidia-key"
+        assert call_kwargs["model"] == "openai/z-ai/glm-5.1"
+        assert call_kwargs["api_base"] == "https://integrate.api.nvidia.com/v1"
+
+    @patch("src.forwarder.forwarder.litellm.acompletion", new_callable=AsyncMock)
+    def test_missing_authorization_passes_none_api_key(self, mock_acompletion):
+        mock_acompletion.return_value = _FakeResponse({"ok": True})
+        forwarder = LitellmForwarder(_make_config())
+
+        async def run():
+            return await forwarder.forward_async(_context())
+
+        asyncio.run(run())
+
+        call_kwargs = mock_acompletion.await_args.kwargs
+        assert call_kwargs["api_key"] is None
+
+    @patch("src.forwarder.forwarder.litellm.acompletion", new_callable=AsyncMock)
+    def test_lowercase_authorization_header_is_recognized(self, mock_acompletion):
+        mock_acompletion.return_value = _FakeResponse({"ok": True})
+        forwarder = LitellmForwarder(_make_config())
+        context = RequestContext(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": "hello"}],
+            extra_headers={"authorization": "Bearer lowercase-key"},
+        )
+
+        async def run():
+            return await forwarder.forward_async(context)
+
+        asyncio.run(run())
+
+        call_kwargs = mock_acompletion.await_args.kwargs
+        assert call_kwargs["api_key"] == "lowercase-key"
+
+    @patch("src.forwarder.forwarder.litellm.acompletion", new_callable=AsyncMock)
+    def test_stream_passes_api_key(self, mock_acompletion):
+        async def _stream(**kwargs):
+            yield _FakeResponse({"chunk": 1})
+
+        mock_acompletion.side_effect = _stream
+        forwarder = LitellmForwarder(_make_config())
+        context = RequestContext(
+            model="openai/z-ai/glm-5.1",
+            messages=[{"role": "user", "content": "hello"}],
+            upstream_target="https://integrate.api.nvidia.com/v1",
+            extra_headers={"Authorization": "Bearer stream-key"},
+            stream=True,
+        )
+
+        async def run():
+            chunks = []
+            async for chunk in forwarder.stream_async(context):
+                chunks.append(chunk)
+            return chunks
+
+        asyncio.run(run())
+
+        call_kwargs = mock_acompletion.await_args.kwargs
+        assert call_kwargs["api_key"] == "stream-key"
+        assert call_kwargs["stream"] is True
+
+
 class TestLitellmForwarderErrors:
     """Verify error handling and retry behavior."""
 

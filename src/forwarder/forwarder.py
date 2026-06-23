@@ -110,6 +110,28 @@ class StubForwarder(Forwarder):
         }
 
 
+def _api_key_from_context(context: RequestContext) -> Optional[str]:
+    """Extract the Bearer token from the Authorization header, if present.
+
+    litellm.acompletion() accepts an ``api_key`` parameter. Clients send the
+    key via the standard ``Authorization: Bearer <token>`` header, so we
+    extract the token here and pass it on. Header names are compared
+    case-insensitively because ASGI frameworks normalize them to lowercase.
+
+    Returns:
+        The API key string, or ``None`` if no Bearer Authorization header is
+        present.
+    """
+    auth: Optional[str] = None
+    for key, value in context.extra_headers.items():
+        if key.lower() == "authorization":
+            auth = value
+            break
+    if auth is not None and auth.lower().startswith("bearer "):
+        return auth[7:].strip() or None
+    return None
+
+
 class LitellmForwarder(Forwarder):
     """Forwarder that calls the upstream API via litellm.acompletion()."""
 
@@ -151,6 +173,7 @@ class LitellmForwarder(Forwarder):
             "model": context.model,
             "messages": context.messages,
             "api_base": context.upstream_target,
+            "api_key": _api_key_from_context(context),
         }
         if context.extra_body:
             kwargs.update(context.extra_body)
@@ -232,6 +255,7 @@ class LitellmForwarder(Forwarder):
             "model": context.model,
             "messages": context.messages,
             "api_base": context.upstream_target,
+            "api_key": _api_key_from_context(context),
             "stream": True,
         }
         if context.extra_body:

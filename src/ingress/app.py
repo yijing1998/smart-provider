@@ -16,7 +16,8 @@ from typing import Any, Optional
 
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from litellm import get_model_info
+from litellm import LITELLM_CHAT_PROVIDERS, get_model_info
+from litellm.utils import get_llm_provider
 from litellm.exceptions import (
     APIConnectionError,
     APIError,
@@ -43,6 +44,47 @@ from src.shutdown import ShutdownManager
 # Reuse litellm's logger namespace so ingress events appear alongside
 # litellm logs when the same handlers are configured.
 logger = logging.getLogger("litellm")
+
+
+def _validate_model_name(model: str) -> None:
+    """Validate that *model* can be routed by litellm.
+
+    Provider-prefixed model names such as ``openai/z-ai/glm-5.1`` are accepted
+    if the provider is known to litellm. Model names without a prefix are
+    validated against litellm's static model info table for backward
+    compatibility.
+
+    Raises:
+        NotFoundError: If the model name is not recognized as valid.
+    """
+    if "/" in model:
+        try:
+            _, provider, _, _ = get_llm_provider(model)
+        except Exception as exc:
+            logger.warning("Unknown provider-prefixed model requested: %s", model)
+            raise NotFoundError(
+                message=f"Model '{model}' is not recognized",
+                llm_provider="smart-provider",
+                model=model,
+            ) from exc
+        if provider not in LITELLM_CHAT_PROVIDERS:
+            logger.warning("Unsupported chat provider '%s' for model: %s", provider, model)
+            raise NotFoundError(
+                message=f"Model '{model}' uses an unsupported provider",
+                llm_provider="smart-provider",
+                model=model,
+            )
+        return
+
+    try:
+        get_model_info(model)
+    except Exception as exc:
+        logger.warning("Unknown model requested: %s", model)
+        raise NotFoundError(
+            message=f"Model '{model}' is not recognized",
+            llm_provider="smart-provider",
+            model=model,
+        ) from exc
 
 
 def create_app(
@@ -209,16 +251,10 @@ def create_app(
                 model=completion_request.model,
             )
 
-        # 4. Validate the model using litellm's model info.
-        try:
-            get_model_info(completion_request.model)
-        except Exception as exc:
-            logger.warning("Unknown model requested: %s", completion_request.model)
-            raise NotFoundError(
-                message=f"Model '{completion_request.model}' is not recognized",
-                llm_provider="smart-provider",
-                model=completion_request.model,
-            ) from exc
+        # 4. Validate the model. Provider-prefixed names (e.g. openai/z-ai/glm-5.1)
+        # are accepted if litellm recognizes the provider; otherwise fall back to
+        # litellm's static model info table.
+        _validate_model_name(completion_request.model)
 
         # 5. Build the internal request context.
         #    litellm may represent messages as dicts or Pydantic models depending

@@ -1,9 +1,5 @@
-# Request-Ingress Capability
+## MODIFIED Requirements
 
-## Purpose
-
-定义客户端请求如何进入 Smart-Provider，包括协议适配、请求校验、上下文封装、健康检查与就绪探测端点、Prometheus 指标端点，以及服务关闭期间的请求拒绝行为；同时明确 Ingress 层所应遵循的技术栈约束。
-## Requirements
 ### Requirement: 代理接收客户端请求
 
 Smart-Provider SHALL 接收来自客户端的模型 API 请求，并将请求封装为内部上下文对象。
@@ -150,4 +146,3 @@ Smart-Provider 的 `/health` 与 `/ready` 端点 SHALL 始终暴露，不受 `ob
 
 - **WHEN** `observability_metrics_enabled=false` 时访问 `/health` 或 `/ready`
 - **THEN** Ingress SHALL 正常返回 200 或 503
-

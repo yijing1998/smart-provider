@@ -86,7 +86,9 @@ INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
 
 ## 5. 发送第一个请求
 
-Smart-Provider 暴露 OpenAI 兼容的 `POST /v1/chat/completions` 端点。你只需要把原本发给上游 API 的请求原样发给 Smart-Provider，`Authorization` 等请求头会自动透传给上游。
+Smart-Provider 暴露 OpenAI 兼容的 `POST /v1/chat/completions` 端点。你只需要把原本发给上游 API 的请求原样发给 Smart-Provider，`Authorization` 请求头中的 Bearer token 会自动作为 `api_key` 透传给上游。
+
+对于 OpenAI 官方模型，直接使用模型名如 `gpt-4o`。对于 NVIDIA NIM 等自定义 OpenAI-compatible endpoint，请使用 litellm 的 provider-prefixed 格式，例如 `openai/z-ai/glm-5.1`。
 
 ### 非流式请求
 
