@@ -1,9 +1,10 @@
 # 配置 Smart-Provider
 
-Smart-Provider 使用 [pydantic-settings](https://docs.pydantic.dev/projects/pydantic-settings/) 加载运行时配置，支持以下两种来源：
+Smart-Provider 使用 [pydantic-settings](https://docs.pydantic.dev/projects/pydantic-settings/) 加载运行时配置，支持以下来源：
 
 - **环境变量**：所有变量以 `SMART_PROVIDER_` 为前缀。
 - **`.env` 文件**：工作目录下的 `.env` 文件（UTF-8 编码）。
+- **自定义 env 文件**：通过 `SMART_PROVIDER_ENV_FILE` 环境变量或 `--env-file` CLI 参数指定。
 
 配置在启动阶段即完成类型与范围校验，非法配置会导致进程立即退出（fail-fast）。
 
@@ -28,6 +29,44 @@ Smart-Provider 使用 [pydantic-settings](https://docs.pydantic.dev/projects/pyd
 │                                         │
 └─────────────────────────────────────────┘
 ```
+
+## 自定义 env 文件
+
+除默认 `.env` 外，Smart-Provider 支持通过以下两种方式指定其他 env 文件：
+
+### 1. `SMART_PROVIDER_ENV_FILE` 环境变量
+
+```bash
+export SMART_PROVIDER_ENV_FILE=prod.env
+.venv/bin/python -m uvicorn src.ingress.app:create_app --factory
+```
+
+### 2. `--env-file` CLI 参数
+
+```bash
+.venv/bin/python -m uvicorn src.ingress.app:create_app --factory --env-file prod.env
+```
+
+### 优先级
+
+当多种方式同时存在时，按以下顺序决定使用哪个文件：
+
+```
+--env-file > SMART_PROVIDER_ENV_FILE > .env
+```
+
+即 `--env-file` 优先级最高，`SMART_PROVIDER_ENV_FILE` 次之，最后才是默认 `.env`。
+
+### 缺失处理
+
+- 默认 `.env` 不存在时，服务仍会启动并使用默认值或环境变量，保持向后兼容。
+- 通过 `SMART_PROVIDER_ENV_FILE` 或 `--env-file` **显式指定**的文件不存在时，服务会在启动阶段抛出 `FileNotFoundError` 并退出，避免配置未生效却启动成功的隐蔽问题。
+
+### 注意事项
+
+- `--env-file` 不支持多次出现，也不支持逗号分隔的多文件路径。
+- 自定义 env 文件中的变量同样以 `SMART_PROVIDER_` 为前缀。
+- 自定义 env 文件会**替代**默认 `.env`，而不是与 `.env` 合并加载。
 
 ## 环境变量清单
 
