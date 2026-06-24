@@ -25,6 +25,7 @@ class TestConfigDefaults:
         assert cfg.rate_limit_rpm == 60
         assert cfg.rate_limit_tpm is None
         assert cfg.rate_limit_window_seconds == 60
+        assert cfg.rate_limit_min_interval_ms is None
         assert cfg.forwarder_timeout_ms == 30000
         assert cfg.forwarder_max_retries == 0
         assert cfg.forwarder_retry_backoff_ms == 1000
@@ -64,6 +65,11 @@ class TestConfigEnvironmentVariables:
         monkeypatch.setenv("SMART_PROVIDER_RATE_LIMIT_RPM", "120")
         cfg = load_config()
         assert cfg.rate_limit_rpm == 120
+
+    def test_rate_limit_min_interval_ms_from_env(self, monkeypatch):
+        monkeypatch.setenv("SMART_PROVIDER_RATE_LIMIT_MIN_INTERVAL_MS", "500")
+        cfg = load_config()
+        assert cfg.rate_limit_min_interval_ms == 500
 
     def test_log_level_from_env_is_normalized(self, monkeypatch):
         monkeypatch.setenv("SMART_PROVIDER_OBSERVABILITY_LOG_LEVEL", "debug")
@@ -198,6 +204,10 @@ class TestConfigValidation:
         with pytest.raises(ValidationError):
             Config(rate_limit_rpm=0)
 
+    def test_rate_limit_min_interval_ms_cannot_be_negative(self):
+        with pytest.raises(ValidationError):
+            Config(rate_limit_min_interval_ms=-1)
+
     def test_server_port_must_be_within_valid_range(self):
         with pytest.raises(ValidationError):
             Config(server_port=70000)
@@ -240,10 +250,16 @@ class TestConfigComponentViews:
         assert cfg.queue.max_wait_ms == 5000
 
     def test_limiter_view(self):
-        cfg = Config(rate_limit_rpm=120, rate_limit_tpm=4000000, rate_limit_window_seconds=30)
+        cfg = Config(
+            rate_limit_rpm=120,
+            rate_limit_tpm=4000000,
+            rate_limit_window_seconds=30,
+            rate_limit_min_interval_ms=100,
+        )
         assert cfg.limiter.rpm == 120
         assert cfg.limiter.tpm == 4000000
         assert cfg.limiter.window_seconds == 30
+        assert cfg.limiter.min_interval_ms == 100
 
     def test_forwarder_view(self):
         cfg = Config(forwarder_timeout_ms=10000, forwarder_max_retries=3, forwarder_retry_backoff_ms=500)

@@ -4,6 +4,7 @@ import asyncio
 import time
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from litellm.exceptions import (
     APIConnectionError,
@@ -391,3 +392,103 @@ class TestLitellmForwarderBackoff:
         assert mock_acompletion.call_count == 3
         # Expected backoff: 50ms + 100ms = 150ms; allow some tolerance.
         assert elapsed >= 0.13
+
+
+class TestLitellmForwarderRateLimitHeaders:
+    """Verify 429 rate-limit headers are logged as-is."""
+
+    def _make_429(
+        self, headers: dict[str, str] | None = None
+    ) -> RateLimitError:
+        request = httpx.Request(
+            "POST", "https://api.openai.com/v1/chat/completions"
+        )
+        response = httpx.Response(status_code=429, headers=headers, request=request)
+        return RateLimitError(
+            message="rate limited",
+            llm_provider="openai",
+            model="gpt-4o",
+            response=response,
+        )
+
+    @patch("src.forwarder.forwarder.observability_logger.warning")
+    @patch("src.forwarder.forwarder.litellm.acompletion", new_callable=AsyncMock)
+    def test_429_logs_x_ratelimit_headers(self, mock_acompletion, mock_log):
+        mock_acompletion.side_effect = self._make_429(
+            headers={
+                "x-ratelimit-remaining-requests": "0",
+                "x-ratelimit-reset-requests": "10s",
+            }
+        )
+        forwarder = LitellmForwarder(_make_config())
+
+        async def run():
+            with pytest.raises(RateLimitError):
+                await forwarder.forward_async(_context())
+
+        asyncio.run(run())
+
+        mock_log.assert_called_once()
+        extra = mock_log.call_args.kwargs["extra"]
+        assert extra["ratelimit_headers"] == {
+            "x-ratelimit-remaining-requests": "0",
+            "x-ratelimit-reset-requests": "10s",
+        }
+
+    @patch("src.forwarder.forwarder.observability_logger.warning")
+    @patch("src.forwarder.forwarder.litellm.acompletion", new_callable=AsyncMock)
+    def test_429_logs_retry_after_header(self, mock_acompletion, mock_log):
+        mock_acompletion.side_effect = self._make_429(
+            headers={"retry-after": "5"}
+        )
+        forwarder = LitellmForwarder(_make_config())
+
+        async def run():
+            with pytest.raises(RateLimitError):
+                await forwarder.forward_async(_context())
+
+        asyncio.run(run())
+
+        extra = mock_log.call_args.kwargs["extra"]
+        assert extra["ratelimit_headers"] == {"retry-after": "5"}
+
+    @patch("src.forwarder.forwarder.observability_logger.warning")
+    @patch("src.forwarder.forwarder.litellm.acompletion", new_callable=AsyncMock)
+    def test_429_logs_empty_dict_when_no_headers(self, mock_acompletion, mock_log):
+        mock_acompletion.side_effect = RateLimitError(
+            message="rate limited", llm_provider="openai", model="gpt-4o"
+        )
+        forwarder = LitellmForwarder(_make_config())
+
+        async def run():
+            with pytest.raises(RateLimitError):
+                await forwarder.forward_async(_context())
+
+        asyncio.run(run())
+
+        extra = mock_log.call_args.kwargs["extra"]
+        assert extra["ratelimit_headers"] == {}
+
+    @patch("src.forwarder.forwarder.observability_logger.warning")
+    @patch("src.forwarder.forwarder.litellm.acompletion", new_callable=AsyncMock)
+    def test_429_logs_mixed_case_headers(self, mock_acompletion, mock_log):
+        mock_acompletion.side_effect = self._make_429(
+            headers={
+                "X-RateLimit-Remaining-Requests": "1",
+                "Retry-After": "12",
+            }
+        )
+        forwarder = LitellmForwarder(_make_config())
+
+        async def run():
+            with pytest.raises(RateLimitError):
+                await forwarder.forward_async(_context())
+
+        asyncio.run(run())
+
+        extra = mock_log.call_args.kwargs["extra"]
+        # litellm normalizes response header names to lowercase.
+        assert extra["ratelimit_headers"] == {
+            "x-ratelimit-remaining-requests": "1",
+            "retry-after": "12",
+        }

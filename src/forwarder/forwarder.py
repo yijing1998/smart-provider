@@ -110,6 +110,26 @@ class StubForwarder(Forwarder):
         }
 
 
+def _extract_ratelimit_headers(exc: RateLimitError) -> dict[str, str]:
+    """Extract upstream rate-limit headers from a RateLimitError.
+
+    Returns a dictionary containing all response header fields whose names
+    contain ``ratelimit`` or equal ``retry-after`` (case-insensitive match),
+    preserving the original header casing.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        return {}
+
+    result: dict[str, str] = {}
+    for key, value in headers.items():
+        lower = key.lower()
+        if "ratelimit" in lower or lower == "retry-after":
+            result[key] = value
+    return result
+
+
 def _api_key_from_context(context: RequestContext) -> Optional[str]:
     """Extract the Bearer token from the Authorization header, if present.
 
@@ -289,6 +309,7 @@ class LitellmForwarder(Forwarder):
                 extra={
                     "error_type": type(exc).__name__,
                     "status_code": getattr(exc, "status_code", 429),
+                    "ratelimit_headers": _extract_ratelimit_headers(exc),
                 },
             )
         else:

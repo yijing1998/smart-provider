@@ -82,6 +82,7 @@ export SMART_PROVIDER_ENV_FILE=prod.env
 | `SMART_PROVIDER_RATE_LIMIT_RPM` | `60` | ≥1 | 每分钟最大请求数（RPM） |
 | `SMART_PROVIDER_RATE_LIMIT_TPM` | 未设置 | 可选，≥1 | 每分钟最大 Token 数（TPM），当前预留 |
 | `SMART_PROVIDER_RATE_LIMIT_WINDOW_SECONDS` | `60` | ≥1 | RPM 滑动窗口宽度（秒） |
+| `SMART_PROVIDER_RATE_LIMIT_MIN_INTERVAL_MS` | 未设置 | 可选，≥0 | 相邻两次向上游发送请求的最小间隔（毫秒），默认不启用 |
 | `SMART_PROVIDER_FORWARDER_TIMEOUT_MS` | `30000` | ≥1 | 上游 HTTP 调用超时（毫秒） |
 | `SMART_PROVIDER_FORWARDER_MAX_RETRIES` | `0` | ≥0 | 上游请求失败后的最大重试次数 |
 | `SMART_PROVIDER_FORWARDER_RETRY_BACKOFF_MS` | `1000` | ≥0 | 重试退避基数（毫秒） |
@@ -94,6 +95,24 @@ export SMART_PROVIDER_ENV_FILE=prod.env
 | `SMART_PROVIDER_DISTRIBUTED_RATE_LIMITER_URL` | 未设置 | 可选字符串 | 分布式限速后端地址，例如 `redis://localhost:6379` |
 
 > 说明：表中标注“当前预留”的字段会被配置模型加载和校验，但当前代码尚未消费，默认处于关闭状态，不影响现有行为。熔断器相关字段已实现。
+
+## 限速策略
+
+Smart-Provider 使用滑动窗口 RPM 限速器控制单位时间内向上游发送的请求总量。当配置 `SMART_PROVIDER_RATE_LIMIT_MIN_INTERVAL_MS` 后，系统还会强制相邻两次放行之间至少间隔指定毫秒，用于平滑突发流量。
+
+实际生效的请求速率同时受 RPM 窗口和最小间隔约束：
+
+```
+实际最大速率 ≈ min(RPM, 60000 / MIN_INTERVAL_MS)
+```
+
+例如：
+
+- `RATE_LIMIT_RPM=60` 且不配置最小间隔：每分钟最多 60 个请求，窗口内允许瞬时突发。
+- `RATE_LIMIT_RPM=60` 且 `RATE_LIMIT_MIN_INTERVAL_MS=2000`：由于相邻请求至少间隔 2 秒，实际每分钟最多约 30 个请求。
+- 仅配置 `RATE_LIMIT_MIN_INTERVAL_MS=1000`：请求将被均匀 spacing 到至少 1 秒一个。
+
+启用最小间隔后，若上游仍返回 429，Smart-Provider 会在 429 可观测日志的 `ratelimit_headers` 字段中原样输出上游响应头中所有包含 `ratelimit` 或 `retry-after` 的字段，便于判断是 RPM、TPM 还是突发限制导致的限流。
 
 ## 熔断器
 

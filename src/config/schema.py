@@ -20,6 +20,7 @@ class LimiterConfig(BaseModel):
     rpm: int = Field(ge=1)
     tpm: Optional[int] = Field(default=None, ge=1)
     window_seconds: int = Field(ge=1)
+    min_interval_ms: Optional[int] = Field(default=None, ge=0)
 
 
 class ForwarderConfig(BaseModel):
@@ -86,6 +87,7 @@ class Config(BaseSettings):
     rate_limit_rpm: int = Field(default=60, ge=1)
     rate_limit_tpm: Optional[int] = Field(default=None, ge=1)
     rate_limit_window_seconds: int = Field(default=60, ge=1)
+    rate_limit_min_interval_ms: Optional[int] = Field(default=None, ge=0)
 
     # Forwarder
     forwarder_timeout_ms: int = Field(default=30000, ge=1)
@@ -143,6 +145,7 @@ class Config(BaseSettings):
             rpm=self.rate_limit_rpm,
             tpm=self.rate_limit_tpm,
             window_seconds=self.rate_limit_window_seconds,
+            min_interval_ms=self.rate_limit_min_interval_ms,
         )
 
     @property
